@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d1020">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>INKWAVE — Turf Riot</title>
 <meta name="description" content="INKWAVE: a 4v4 turf-war ink shooter. Paint the plaza, swim through your ink, splat the other team.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M32 4c8 0 14 7 14 16 0 6-2 9-2 13 0 5 6 6 6 12 0 4-3 6-6 6-4 0-5-4-8-4s-2 9-4 9-2-9-4-9-4 4-8 4c-3 0-6-2-6-6 0-6 6-7 6-12 0-4-2-7-2-13C18 11 24 4 32 4z' fill='%23ff8a14'/%3E%3Ccircle cx='26' cy='22' r='4' fill='%23fff'/%3E%3Ccircle cx='38' cy='22' r='4' fill='%23fff'/%3E%3C/svg%3E">
@@ -10,12 +14,21 @@
 <link rel="preload" href="assets/fonts/Rubik-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="styles/ui.css">
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1020; user-select: none; -webkit-user-select: none; }
+  /* touch-action: none is a prerequisite, not polish: Android Chrome ignores user-scalable=no, so without it the second
+     finger of a look+fire gesture is read as a pinch and BOTH pointers get cancelled. overscroll-behavior stops a
+     downward drag near the top from turning into pull-to-refresh mid-round. */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1020; user-select: none; -webkit-user-select: none;
+    touch-action: none; overscroll-behavior: none; -webkit-touch-callout: none; }
   #app { position: fixed; inset: 0; }
   #app canvas { display: block; width: 100%; height: 100%; outline: none; }
   #ui-root { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
   #fade { position: fixed; inset: 0; background: #0d1020; opacity: 1; pointer-events: all; z-index: 50; transition: opacity 600ms ease; }
-  #boot-error { display: none; position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 60; color: #fff; font: 600 16px/1.4 system-ui, sans-serif; background: #c0263d; padding: 16px 20px; border-radius: 12px; max-width: 520px; }
+  /* Wide enough to read on a phone, scrollable so a long message is never clipped, and selectable so the text can be
+     copied off the device. */
+  #boot-error { display: none; position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 60; color: #fff;
+    font: 600 15px/1.45 system-ui, sans-serif; background: #c0263d; padding: 18px 20px; border-radius: 12px;
+    width: min(88vw, 560px); max-height: 72vh; overflow: auto; word-break: break-word;
+    user-select: text; -webkit-user-select: text; box-shadow: 0 12px 40px rgba(0, 0, 0, .55); }
 </style>
 <script type="importmap">
 { "imports": { "three": "./vendor/three/build/three.module.js", "three/addons/": "./vendor/three/jsm/" } }
@@ -29,6 +42,19 @@
 <script>
   // fade in once the loading screen is mounted
   window.addEventListener('DOMContentLoaded', () => setTimeout(() => { const f = document.getElementById('fade'); if (f) { f.style.opacity = '0'; f.style.pointerEvents = 'none'; } }, 60));
+
+  // Remote error beacon. A phone has no console you can attach, so a failure there is otherwise invisible — and the
+  // red box below can be missed or covered. A fire-and-forget GET to a path that cannot exist lands in the dev
+  // server's log (tools/serve.py logs every 4xx together with its path), which is enough to diagnose the device from
+  // the machine serving it. Deliberately in index.html rather than main.js: this way it also catches a failure while
+  // the module itself is still loading.
+  window.__beacon = (kind, msg) => {
+    // Truncate BEFORE encoding: percent-encoding inflates a stack trace roughly threefold, so slicing the encoded
+    // form (as this first did) cut it to a third of the intended length.
+    try { fetch('/__inkwave_error/' + encodeURIComponent((kind + ': ' + String(msg)).slice(0, 1800))).catch(() => {}); } catch (e) { /* give up quietly */ }
+  };
+  window.addEventListener('error', (e) => { if (e && e.message) window.__beacon('error', e.message + ' @ ' + (e.filename || '?') + ':' + (e.lineno || 0)); });
+  window.addEventListener('unhandledrejection', (e) => window.__beacon('rejection', (e && e.reason && e.reason.message) || String(e && e.reason)));
 </script>
 <script type="module" src="./src/main.js"></script>
 </body>

@@ -558,6 +558,30 @@ export const PROGRESSION = {
   zones: { turfScale: 0.6, xpPerZoneTurfPoint: 1.0, xpKnockout: 300 },
 };
 
+// ---- On-screen touch controls (src/core/touch.js) ----
+export const TOUCH = {
+  // Button cluster geometry, in multiples of the step unit `u`. `u` follows the short screen edge so the cluster keeps
+  // its proportions in landscape; it is NOT the UI's --u, which collapses to under half its design size on a phone and
+  // would leave the buttons too small to hit.
+  stepFrac: 0.062,          // u = min(viewport w, h) * stepFrac, clamped to the two values below
+  minStep: 22,              // never smaller (the fire button is ~3 steps across ⇒ a ~44dp+ target)
+  maxStep: 42,
+  edgeSteps: 1.4,           // keep this far (in steps) off the screen edge …
+  edgeMin: 34,              // … but never closer than this in px: Android's back gesture owns the edge and cancels touches
+  stickR: 4.6,              // movement stick radius, in steps
+  topGuard: 0.16,           // the stick never starts above this fraction of the screen height
+  // Camera gain for touch look. The mouse path is calibrated for pointer-lock counts, which are unbounded; a drag is
+  // bounded by the screen, so a full-width swipe has to be able to turn you around. Scaled by settings.touchSensitivity.
+  lookSens: 0.0052,         // radians per CSS pixel (~2.5x the mouse's 0.0021)
+  // Floors for the RENDERER's image settings on a touch device (see rendererQuality). A 3x phone screen shows the
+  // tier's desktop-calibrated 0.75 pixel ratio and zero anti-aliasing as heavy jaggies; these raise only those two.
+  minPixelRatio: 1.5,
+  minMsaa: 2,
+  // GPU memory is the binding constraint on a phone, not frame time: Chromium evicts its own compositor shared
+  // images when the GPU process runs short, which shows up as DOM tiles failing to rasterise (the loading screen
+  // turns to noise) long before the WebGL context itself is lost.
+};
+
 // ---- Settings defaults (persisted in localStorage 'inkwave.settings') ----
 export const DEFAULT_SETTINGS = {
   sensitivity: 1.0,         // mouse multiplier 0.2..3
@@ -565,6 +589,7 @@ export const DEFAULT_SETTINGS = {
   invertY: false,
   fov: 82,                  // horizontal FOV at 16:9, 65..100
   quality: 'high',          // 'low' | 'medium' | 'high' | 'ultra'
+  qualityChosen: false,     // set when the player picks a tier in the settings; the touch default only applies while false
   shadows: true,
   bloom: true,
   cameraShake: 1.0,         // 0..1
@@ -579,7 +604,21 @@ export const DEFAULT_SETTINGS = {
   rumble: 1.0,              // gamepad vibration 0..1 (only while the pad is the last-used device)
   aimAssist: 1.0,           // gamepad aim assist 0..1
   aimAssistMouse: false,    // optional aim assist for mouse
+  touchControls: 'auto',    // on-screen controls: 'auto' (decide by device) | 'on' | 'off'
+  touchSensitivity: 1.0,    // touch look multiplier 0.2..3
+  touchInvertY: false,      // kept separate from invertY: the natural touch mapping is usually the opposite of the mouse's
 };
+
+// The renderer's view of the quality tier. Touch devices default to `low` for its MEMORY footprint (small atlas,
+// small shadow map) — that part is load-bearing on a phone — but its image settings are calibrated for a desktop
+// monitor: pixelRatio 0.75 and msaa 0 together render the scene at three-quarters of CSS resolution with no
+// anti-aliasing at all, which on a 3x phone screen is a field of jaggies. Sharpen those two knobs only; the
+// storage-related fields (paintAtlas, shadowSize, particles) stay exactly as the tier defines them.
+export function rendererQuality(settings, touch) {
+  const q = QUALITY[settings?.quality] || QUALITY.high;
+  if (!touch) return q;
+  return { ...q, pixelRatio: Math.max(q.pixelRatio, TOUCH.minPixelRatio), msaa: Math.max(q.msaa, TOUCH.minMsaa) };
+}
 
 // Quality presets consumed by the renderer + fx.
 export const QUALITY = {

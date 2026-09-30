@@ -18,6 +18,7 @@
 //          q ≈ 0.82), <out>/manifest.json, and a review sheet /private/tmp/menus/stages/contact.png (the crop of the
 //          ~1100×520 `object-fit: cover` hero panel is shown undimmed; everything outside it is dimmed).
 import puppeteer from 'puppeteer-core';
+import { chromePath, gpuArgs } from './chrome.mjs';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -182,9 +183,9 @@ async function captureInPage(P) {
 
 // ------------------------------------------------------------------------------------------------ browser
 const browser = await puppeteer.launch({
-  executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  executablePath: chromePath(),
   headless: 'new',
-  args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', `--window-size=${W},${H}`],
+  args: gpuArgs([`--window-size=${W},${H}`]),
   defaultViewport: { width: W, height: H, deviceScaleFactor: DSF },
   protocolTimeout: 600000,
 });

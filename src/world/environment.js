@@ -1464,6 +1464,11 @@ export class Environment {
     this.bounds = { minX: b.minX, maxX: b.maxX, minZ: b.minZ, maxZ: b.maxZ };
     this.footprint = (opts.footprint && opts.footprint.length ? opts.footprint : [this.bounds]).map(orect);
     this.shadowSize = opts.shadowSize || 4096;
+    // Force the baked deck/hull distance field instead of the uRects/uWet uniform arrays. Those four arrays cost 144
+    // fragment uniform slots on their own, and phone GPUs only guarantee 256 in total — with them in place the sea
+    // shader exceeds the limit and FAILS TO LINK (the entire sea silently vanishes). The field is the same feature,
+    // already used by stages with more rects than slots; baking it costs one GPU pass per stage load.
+    this.forceDeckField = !!opts.forceDeckField;
     this.waterY = WATER_Y;
     this.time = 0;
     this.theme = null;
@@ -1694,7 +1699,11 @@ export class Environment {
     const envSky = new THREE.Mesh(geo, mk(true));
     envSky.frustumCulled = false;
     this._envScene.add(envSky);
-    this._pmrem = new THREE.PMREMGenerator(this.renderer);
+    // ?env=off must skip the constructor too, not just the fromScene() call in _rebuildEnvMap: PMREMGenerator
+    // compiles its cube/GGX shaders the moment it is built, so gating only the later call leaves PMREM's heaviest
+    // shaders in the boot and the flag proves nothing. (An earlier version of this flag made exactly that mistake.)
+    this._envOff = typeof location !== 'undefined' && new URLSearchParams(location.search).get('env') === 'off';
+    this._pmrem = this._envOff ? null : new THREE.PMREMGenerator(this.renderer);
   }
 
   _initCloudBake() {
@@ -1741,8 +1750,21 @@ export class Environment {
   }
 
   _rebuildEnvMap() {
+    // ?env=<n> shrinks the PMREM (clamped to the cubemap sizes it accepts); ?env=off removes it at the source — see
+    // _buildSky. The PMREM pair (SphericalGaussianBlur + PMREMGGXConvolution) is the first heavy shader work boot
+    // asks for, so it is the prime suspect when a mobile driver loses the context early.
+    const flag = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('env') : null;
     const old = this._envRT;
-    this._envRT = this._pmrem.fromScene(this._envScene, 0, 0.1, 100, { size: 256 });
+    if (!this._pmrem) {
+      this._envRT = null;
+      const prev = this.envMap;
+      this.envMap = null;                       // the same state the constructor leaves it in, so callers already cope
+      if (this.scene.environment === prev || this.scene.environment == null) this.scene.environment = null;
+      if (old) old.dispose();
+      return;
+    }
+    const size = flag ? Math.max(16, Math.min(256, +flag || 256)) : 256;
+    this._envRT = this._pmrem.fromScene(this._envScene, 0, 0.1, 100, { size });
     const prev = this.envMap;
     this.envMap = this._envRT.texture;
     if (this.scene.environment === prev || this.scene.environment == null) this.scene.environment = this.envMap;
@@ -3110,7 +3132,7 @@ export class Environment {
     if (this._envRT) this._envRT.dispose();
     this._cloudRT?.dispose(); this._cloudMat?.dispose();
     this._reflRT?.dispose(); this._farRT?.dispose(); this._stripMat?.dispose(); this._underMat?.dispose();
-    this._pmrem.dispose();
+    this._pmrem?.dispose();   // null under ?env=off
     this.U.uWaveTex.value?.dispose(); this.U.uFoamTex.value?.dispose(); this._fieldRT?.dispose(); this._fieldMat?.dispose(); this._fieldQuad?.geometry.dispose();
   }
 }

@@ -6,6 +6,7 @@
 //   grounded flicker, camera angular jitter (high-pass residual of yaw/pitch), camera position jitter,
 //   jump arcs, jump buffer / coyote, swim + climb profiles, projectile-vs-crosshair error.
 import puppeteer from 'puppeteer-core';
+import { chromePath, gpuArgs } from './chrome.mjs';
 import { writeFileSync, mkdirSync } from 'node:fs';
 
 const args = process.argv.slice(2);
@@ -325,8 +326,8 @@ function arc(r, label) {
 
 // ------------------------------------------------------------------------------------------ run
 const browser = await puppeteer.launch({
-  executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: 'new',
-  args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', '--window-size=1280,720'],
+  executablePath: chromePath(), headless: 'new',
+  args: gpuArgs(['--window-size=1280,720']),
   defaultViewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
 });
 const page = await browser.newPage();

@@ -6,9 +6,12 @@
 //                                      soft sun shadows cast by tall blocks, contact AO, crisp rims, grates, props
 //   ink    (≤ 6 Hz, on paint.version)  bilinear team field → smooth anti-aliased blobs, glossy embossed rims
 //   flash  (with ink)                  freshly claimed pixels, faded out over ~0.4 s
-//   live   (every frame)               spawn pads, bombs (arming blink), tempest clouds + rain radius, slam shock rings,
+//   live   (~20 Hz, see MAP_COMPOSE_EVERY)  spawn pads, bombs (arming blink), tempest clouds + rain radius, slam shock rings,
 //                                      super-jump landing targets + your team's jump travel lines (_jumpLines),
 //                                      respawn pulses (splats: the HUD's death markers)
+
+// How many frames to accumulate between minimap recomposes (3 = ~20 Hz at 60 fps).
+const MAP_COMPOSE_EVERY = 3;
 import { G, on } from '../core/ctx.js';
 import { SPECIALS, SUB } from '../config.js';
 
@@ -360,7 +363,15 @@ export class Minimap {
       else { this._drawInk(0, Math.floor(this.h / BANDS)); this._band = 1; }
     }
     this.flashT += dt;
-    this._compose(dt);
+    // Recompose at ~20 Hz, not every frame. Each compose blits the whole map canvas twice — and because that canvas
+    // is a live DOM element, every frame it changes costs a full canvas -> GPU re-upload on top. A map does not need
+    // 60 Hz to read as live. This is the largest single per-frame cost on a phone (measured 8.8 ms/frame average and
+    // 189 ms peak on an Adreno 730) and, crucially, it runs AFTER main.js stops its perf.sim / perf.render timers —
+    // which is why every earlier probe missed it while 3D scene objects kept measuring free.
+    // dt is accumulated rather than dropped so the compose's own time-based effects keep their real speed.
+    this._cAcc = (this._cAcc || 0) + dt;
+    this._cN = (this._cN || 0) + 1;
+    if (this._cN >= MAP_COMPOSE_EVERY) { this._cN = 0; const acc = this._cAcc; this._cAcc = 0; this._compose(acc); }
   }
 
   _compose(dt) {

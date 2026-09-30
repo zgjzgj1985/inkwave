@@ -1,5 +1,7 @@
 dist/
 node_modules/
+# screenshot / audit output from the tools (docs/CONTRACTS.md tells tools to write here)
+shots/
 .vercel/
 .wrangler/
 .env*

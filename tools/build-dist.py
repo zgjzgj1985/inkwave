@@ -23,6 +23,6 @@ for f in seen:
     d = os.path.join('dist/vendor/three/jsm', f); os.makedirs(os.path.dirname(d), exist_ok=True); shutil.copy(os.path.join(root, f), d)
 os.makedirs('dist/vendor/three/build', exist_ok=True)
 for f in ['three.module.js', 'three.core.js']: shutil.copy('vendor/three/build/' + f, 'dist/vendor/three/build/' + f)
-for d in ['src', 'styles', 'assets']: shutil.copytree(d, 'dist/' + d)
+for d in ['src', 'styles', 'assets', 'songs']: shutil.copytree(d, 'dist/' + d)
 shutil.copy('index.html', 'dist/index.html')
 print('dist ready:', len(seen), 'addon files')

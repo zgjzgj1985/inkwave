@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { G, on, emit, clamp, damp } from './core/ctx.js';
 import { Renderer } from './core/renderer.js';
 import { Input } from './core/input.js';
+import { TouchControls, shouldUseTouch, isTouchDevice } from './core/touch.js';
 import { mapTheme,
   DEFAULT_SETTINGS, QUALITY, TEAM_PALETTES, COLORBLIND_PALETTE, TEAM_NAMES, WEAPONS, WEAPON_ORDER, WEAPON_SUCCESSOR, ZONES, SUB, SUBS, SUB_ORDER, SPECIALS, SPECIAL_ORDER,
   MAPS, DIFFICULTY, PLAYER, PROGRESSION, VERSION, MATCH, OFFLINE_MAPS, mapOfflineOk, mapNoBots, mapBossOk,
@@ -42,8 +43,22 @@ function loadJSON(key, def) { try { const v = JSON.parse(localStorage.getItem(ke
 function saveJSON(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch { /* private mode */ } }
 const DEFAULT_PROFILE = { name: 'Player', level: 1, xp: 0, wins: 0, matches: 0, totalTurf: 0, weapon: 'shooter' };
 
+// Modules that may fall back to a stub when their file is missing. Written as literal import() calls on purpose: a
+// single `import(someVariable)` cannot be resolved by a bundler, so it survives into a bundled build and makes the
+// browser re-fetch the whole unbundled module graph at runtime — which is the request waterfall bundling exists to
+// remove. Keep this list in step with the loadModule() call sites below.
+const LOADERS = {
+  './ui/menus.js': () => import('./ui/menus.js'),
+  './ui/hud.js': () => import('./ui/hud.js'),
+  './game/character.js': () => import('./game/character.js'),
+  './fx/fx.js': () => import('./fx/fx.js'),
+  './world/environment.js': () => import('./world/environment.js'),
+  './audio/audio.js': () => import('./audio/audio.js'),
+  './audio/music.js': () => import('./audio/music.js'),
+};
+
 async function loadModule(path, stubName) {
-  try { return await import(path); }
+  try { return await LOADERS[path](); }
   catch (e) {
     console.error(`[inkwave] failed to load ${path} — using stub`, e);
     const stubs = await import('./dev/stubs.js');
@@ -57,6 +72,11 @@ class Game {
     // real top-down thumbnails for the stage cards, generated from each layout's geometry
     for (const m of MAPS) { try { m.thumb = layoutThumbSVG(MAP_LAYOUTS[m.layout || m.id], m.theme); } catch (e) { console.warn('thumb', m.id, e); } }
     this.settings = G.settings = loadJSON('inkwave.settings', DEFAULT_SETTINGS);
+    // The RAW stored blob, read before anything below can save the merged defaults back. The fov migration two lines
+    // down persists the whole object, so afterwards "the player never chose a value" and "we just wrote the default"
+    // are indistinguishable — which is exactly how the touch quality tier below silently failed to apply.
+    let storedRaw = null;
+    try { storedRaw = JSON.parse(localStorage.getItem('inkwave.settings')); } catch { /* private mode */ }
     // desktop app: the window's fullscreen state is owned by the native shell; mirror it into settings for the menu
     if (window.inkwaveNative) {
       this.settings.fullscreen = window.inkwaveNative.isFullScreen();
@@ -64,6 +84,31 @@ class Game {
     }
     // v1.1: fov became horizontal — migrate old vertical values once
     if (this.settings.fovMode !== 'h') { this.settings.fov = DEFAULT_SETTINGS.fov; this.settings.fovMode = 'h'; saveJSON('inkwave.settings', this.settings); }
+    // Touch devices: on-screen controls, and a quality tier the hardware can actually hold. Decided before the
+    // Renderer exists because the tier picks the paint atlas size and the shadow map — at `high` those are a 4096²
+    // ink atlas (64 MB of VRAM) plus a 4096² shadow map re-rendered every frame, which is what kills a phone tab.
+    // `qualityChosen` is set only by the settings screen, so a value the player actually picked always wins; a
+    // defaulted one does not. Testing the flag rather than "is quality present" also repairs devices that already
+    // had the default persisted by an earlier run.
+    this.touchMode = shouldUseTouch(this.settings);
+    if (this.touchMode && storedRaw?.qualityChosen !== true) {
+      this.settings.quality = 'low';
+      // Shadows cost a shadow-map render pass and, more importantly, a shadow variant of every material's program —
+      // which is exactly the kind of extra shader count that hurts on a phone. Off by default there; the settings
+      // screen can turn them back on.
+      this.settings.shadows = false;
+      this.settings.qualityChosen = false;
+      saveJSON('inkwave.settings', this.settings);
+    }
+    // Touch devices also halve the two largest GPU allocations. The tiers are sized for a desktop GPU; on a phone the
+    // 2048² ink atlas and the procedural texture set are tens of megabytes of video memory before the world is even
+    // built, and an Android GPU process that runs out of memory is killed outright — every WebGL context dies with it
+    // and the browser reloads the tab, which the app only sees as a bare context loss with no error and no stack.
+    this.memK = this.touchMode ? 0.5 : 1;   // read by _buildWorldNow too, hence an instance field
+    // ?quality=low|medium|high|ultra — an explicit override for device testing. Beats localStorage, so a tier can be
+    // pinned from the URL without clearing site data on a phone you cannot reach with a console.
+    const qOverride = params.get('quality');
+    if (qOverride && QUALITY[qOverride]) this.settings.quality = qOverride;
     this.profile = loadJSON('inkwave.profile', DEFAULT_PROFILE);
     if (WEAPON_SUCCESSOR[this.profile.weapon]) this.profile.weapon = WEAPON_SUCCESSOR[this.profile.weapon];   // retired weapons
     const app = document.getElementById('app');
@@ -85,6 +130,35 @@ class Game {
     // renderer / scene
     this.R = new Renderer(app, this.settings);
     G.renderer = this.R.renderer;
+    // Device capability probe. Reported before anything heavy runs so it arrives even when a later step dies, and it
+    // is the only way to see a phone's real limits without a console on that phone.
+    try {
+      const gl = this.R.renderer.getContext();
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      const get = (k) => { const v = gl.getParameter(gl[k]); return Array.isArray(v) ? v.length : v; };
+      window.__beacon?.('gpu', JSON.stringify({
+        renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+        webgl2: typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext,
+        ver: gl.getParameter(gl.VERSION),
+        // the limits a shader-heavy scene actually trips over
+        vUniform: get('MAX_VERTEX_UNIFORM_VECTORS'), fUniform: get('MAX_FRAGMENT_UNIFORM_VECTORS'),
+        vTex: get('MAX_VERTEX_TEXTURE_IMAGE_UNITS'), fTex: get('MAX_TEXTURE_IMAGE_UNITS'),
+        varyings: get('MAX_VARYING_VECTORS'), maxTex: get('MAX_TEXTURE_SIZE'),
+        attrs: get('MAX_VERTEX_ATTRIBS'), samples: get('MAX_SAMPLES'),
+        dpr: devicePixelRatio, screen: `${innerWidth}x${innerHeight}`, quality: this.settings.quality,
+      }));
+    } catch (e) { window.__beacon?.('gpu-probe-failed', e.message); }
+    // A lost context is the likeliest explanation for createShader() returning null, and it is silent otherwise.
+    this.R.renderer.domElement.addEventListener('webglcontextlost', (e) => { window.__beacon?.('context-lost', 'webglcontextlost fired'); }, false);
+    // ?proglog records every shader program in creation order. Attached here — the moment the renderer exists and
+    // before anything renders — so the list is complete; a device that dies partway through compilation can then be
+    // told apart from a healthy one by where its list stops.
+    if (params.has('proglog')) {
+      const info = this.R.renderer.info;
+      const push = info.programs.push.bind(info.programs);
+      window.__progLog = [];
+      info.programs.push = (...a) => { window.__progLog.push(a[0]?.name || '(unnamed)'); return push(...a); };
+    }
     const scene = (G.scene = new THREE.Scene());
     const camera = (G.camera = new THREE.PerspectiveCamera(this.settings.fov, innerWidth / innerHeight, 0.15, 6500));
     camera.position.set(0, 40, -60);
@@ -92,6 +166,44 @@ class Game {
     this.input = G.input = new Input(this.R.renderer.domElement);
     this.input.onKey = (e, repeat) => this._onKey(e, repeat);
     this.input.onUnlock = () => this._onPointerUnlock();
+    // On-screen controls. All their listeners are on `window` with geometric hit-testing (see core/touch.js), so the
+    // layer itself is purely visual and never intercepts a menu tap.
+    this.input.setTouchMode(this.touchMode);
+    if (this.touchMode) {
+      this.touch = G.touch = new TouchControls(this.input);
+      this.touch.mount(this.uiRoot);
+      this.input.onPause = () => this.pause();
+      // Fullscreen on the first touch, then lock landscape. Both require a user gesture, and the first tap on the
+      // title screen is the natural one — it is also the only moment a player is not mid-round. Without this the
+      // browser's address bar and gesture bar eat roughly a quarter of the screen height, and fullscreen is what
+      // orientation.lock needs in order to hold landscape (so a phone that does not rotate with the hand still
+      // plays, and the portrait gate stays a hint rather than a requirement). ?nofullscreen opts out for a device
+      // test that needs the URL bar visible.
+      if (!params.has('nofullscreen')) {
+        const enterFs = () => {
+          const el = document.documentElement;
+          if (document.fullscreenElement || !el.requestFullscreen) return;
+          el.requestFullscreen({ navigationUI: 'hide' })
+            .then(() => { screen.orientation?.lock?.('landscape')?.catch?.(() => {}); })
+            .catch(() => { /* refused — stay armed and try again on the next gesture */ });
+        };
+        // Stay armed until a request actually succeeds, and re-arm whenever fullscreen is left. A one-shot listener
+        // is wrong here: a tap that lands while a request is in flight (or that the browser refuses) burns the only
+        // chance the player gets, and leaving fullscreen afterwards would strand them windowed for the rest of the
+        // session. Once it succeeds the listener comes off, so nothing is re-requested on every later tap.
+        const arm = () => window.addEventListener('pointerdown', enterFs, true);
+        const disarm = () => window.removeEventListener('pointerdown', enterFs, true);
+        document.addEventListener('fullscreenchange', () => { if (document.fullscreenElement) disarm(); else arm(); });
+        if (!document.fullscreenElement) arm();
+      }
+      // There is no pointer lock to lose on a phone, so _onPointerUnlock never fires and nothing would stop a round
+      // when the player leaves the app. Same predicate as that path: backgrounding a live round is a pause.
+      this._onHide = () => {
+        if (!document.hidden) return;
+        if (G.mode === 'match' && this.match && !this.match.paused && this.match.state === 'playing' && !this.menus?.current) this.pause();
+      };
+      document.addEventListener('visibilitychange', this._onHide);
+    }
     // after a focus steal while the map was held, the next click on the game takes the mouse back (no pause detour)
     this.R.renderer.domElement.addEventListener('mousedown', () => {
       if (this._relock && G.mode === 'match' && this.match && !this.match.paused && !this.menus?.current) { this._relock = false; this.input.requestLock(); }
@@ -118,13 +230,13 @@ class Game {
     this.murals = await createMuralTexture();
     try {
       const { createTextureLibrary } = await import('./world/texlib.js');
-      this.texlib = await createTextureLibrary(G.renderer, { size: q.paintAtlas >= 4096 ? 512 : 256 });
+      this.texlib = await createTextureLibrary(G.renderer, { size: (q.paintAtlas >= 4096 ? 512 : 256) * this.memK });
     } catch (e) { console.error('[inkwave] texture library failed — procedural fallback', e); this.texlib = null; }
     await this._buildWorld(map);
     this.zoneMarks = new ZoneMarks(scene);   // Zone Control ground markings: build / clear themselves on 'match:state'
     await progress(0.4, 'Filling the harbor…');
     const B = G.level.bounds;
-    G.env = new envMod.Environment(G.renderer, scene, { bounds: B, theme: this.theme, shadowSize: q.shadowSize, footprint: this._footprint(G.level) });
+    G.env = new envMod.Environment(G.renderer, scene, { bounds: B, theme: this.theme, shadowSize: q.shadowSize, footprint: this._footprint(G.level), forceDeckField: this.touchMode });
     if (G.env.envMap) scene.environment = G.env.envMap;
     // sky-fill balance (scene.environmentIntensity, hemisphere) + per-theme exposure are the environment theme's job
     // (Environment.setTheme), so a stage/time looks the same booted into or switched to mid-session
@@ -161,8 +273,20 @@ class Game {
     // warm up: compile every shader now so the first shot/splat never hitches
     await progress(0.85, 'Warming up…');
     this._warmup();
-    // compile in parallel (KHR_parallel_shader_compile) so the loading screen keeps animating instead of freezing
-    try { await G.renderer.compileAsync(scene, camera); } catch { G.renderer.compile(scene, camera); }
+    // Shader compile. three.js's compileAsync calls compile() SYNCHRONOUSLY as its first statement — the extension
+    // only lets the driver do the work in the background while the main thread carries on. Without
+    // KHR_parallel_shader_compile (true of most Android phones, including the Adreno 730 this was debugged on) that
+    // becomes one blocking burst building every program in the scene back to back, and on that device the burst is
+    // what kills the WebGL context. Where the extension is absent, skip the burst: each material then builds its
+    // program the first time it is actually drawn, spread over the warm-up frames and the first seconds of the
+    // attract match — a few hitches instead of a dead context. ?lazycompile forces this path on a desktop that has
+    // the extension, so it can still be exercised without a phone.
+    const parallelCompile = !!G.renderer.getContext().getExtension('KHR_parallel_shader_compile');
+    if (parallelCompile && !params.has('lazycompile')) {
+      try { await G.renderer.compileAsync(scene, camera); } catch { G.renderer.compile(scene, camera); }
+    } else {
+      console.info('[inkwave] compiling shaders lazily (no KHR_parallel_shader_compile)');
+    }
     for (const m of this._warmMeshes || []) { G.scene.remove(m); }
     this._warmMeshes?.[0]?.geometry.dispose(); this._warmMeshes = null;
     await progress(0.93, 'Warming up…');
@@ -172,6 +296,14 @@ class Game {
 
     this.timer = new THREE.Timer(); this.timer.connect?.(document);
     this.fpsAcc = 0; this.fpsN = 0; this.fps = 60;
+    // Drop the frame-rate reading while the page is hidden. A hidden tab gets no animation frames at all, so `fps`
+    // would freeze at whatever it was when the player looked away — and then be shown again, stale, on return. That
+    // is indistinguishable from a real slowdown both to a player watching the counter and to anyone reading it over
+    // a debugger, and it sent this investigation down several blind alleys.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { this.fps = 0; this.fpsAcc = 0; this.fpsN = 0; }
+      else { this._lastTs = undefined; this.timer.update(); }
+    });
     G.mode = 'menu';
     this.menus?.show(params.has('skipTitle') ? 'main' : 'title');
     // the online hub / lobby set loads in the background once the menus are idle (no arena flash on the first visit)
@@ -242,7 +374,7 @@ class Game {
     const level = (G.level = new Level(layoutFor(MAP_LAYOUTS[layoutId], mode), colliders));
     G.physics = new Physics(level);
     const lightmap = await this._loadLightmap(level, worldKey);
-    G.paint = new PaintSystem(G.renderer, level, { atlasSize: q.paintAtlas, maxDensity: q.paintAtlas >= 4096 ? 30 : 18 });
+    G.paint = new PaintSystem(G.renderer, level, { atlasSize: Math.max(512, Math.round(q.paintAtlas * this.memK)), maxDensity: q.paintAtlas >= 4096 ? 30 : 18 });
     this.murals.userData.setStage?.(layoutId);   // stage decals (murals.js) before the material reads the table
     this.levelMat = createLevelMaterial(G.paint.texture, G.paint.size, this.murals, { lightmap, texlib: this.texlib });
     (this.swimWake || (this.swimWake = new SwimWake())).reset();
@@ -397,6 +529,8 @@ class Game {
 
   _setSettings(partial) {
     Object.assign(this.settings, partial);
+    // an explicit quality pick must outrank the touch-device default (see boot())
+    if ('quality' in partial) this.settings.qualityChosen = true;
     saveJSON('inkwave.settings', this.settings);
     if ('quality' in partial || 'shadows' in partial || 'bloom' in partial) this.R?.applySettings(this.settings);
     if ('fullscreen' in partial && window.inkwaveNative) window.inkwaveNative.setFullScreen(!!partial.fullscreen);
@@ -1084,8 +1218,7 @@ class Game {
 
   // hold the frame target: when a 4 s window of a live round averages over ~112% of it (frames missing vsync, which
   // on a 120 Hz display reads as 8/16 ms judder), drop render density one notch. Stepping back up needs 12 s locked
-  // at the target and happens at most twice, so the image never pumps between sizes (re-sizing every couple of
-  // seconds read as flicker).
+  // at the target, and a down-step re-arms that allowance — see below.
   _dynRes(dt) {
     if (dt <= 0 || dt > 0.25) return;
     const d = this._dyn || (this._dyn = { acc: 0, n: 0, t: 0, fast: 0, ups: 0 });
@@ -1096,7 +1229,12 @@ class Game {
     const m = this.match;
     if (this.settings.quality === 'ultra' || document.hidden || !m || m.attract || m.state !== 'playing') { d.fast = 0; return; }
     const s = this.R.dynScale || 1, tgt = this._frameTarget() / 1000;
-    if (avg > tgt * 1.12 && s > this.R.dynFloor() + 0.01) { this.R.setDynamicScale(s - 0.125); d.fast = 0; }
+    // `ups` caps how many times the scale may climb back, so the image never pumps between sizes (re-sizing every
+    // couple of seconds read as flicker). It is deliberately NOT a lifetime budget: a down-step means the device's
+    // conditions actually changed, so it re-arms the allowance. Without that, one transient spike (another tab, a
+    // thermal moment, a hitch while a shader compiles) pins the game at low resolution for the rest of the session
+    // even after the cause is long gone — which is what a player experiences as "the game is stuck looking bad".
+    if (avg > tgt * 1.12 && s > this.R.dynFloor() + 0.01) { this.R.setDynamicScale(s - 0.125); d.fast = 0; d.ups = 0; }
     else if (avg < tgt * 1.04 && s < 1 && d.ups < 2) { if (++d.fast >= 3) { this.R.setDynamicScale(s + 0.125); d.fast = 0; d.ups++; } }
     else d.fast = 0;
   }
@@ -1106,6 +1244,8 @@ class Game {
     G.renderer.info.reset();
     G.time += dt;
     this.input.pollPad();
+    this.input.pollTouch();
+    this.touch?.update();          // gate the on-screen controls on "in a match, no menu open"
     this._padMenus();
     G.net?.update?.(dt);
     const m = this.match;
@@ -1383,7 +1523,7 @@ class Game {
       // a Super Jump planned on the TAB map while splatted ({ kind, target, name } | null): shown on the splat screen
       jumpQueue: !a.alive ? m.controller?.jumpQueue || null : null,
       prompt,
-      fps: this.settings.showFps ? this.fps : undefined,
+      fps: this.settings.showFps && this.fps ? this.fps : undefined,   // 0 while the page is hidden: show nothing rather than a stale or zero reading
       // Zone Control: counts / penalties / the operational objective (HUD counters, objective chip, banners)
       zones: m.zones ? { ...m.zones.state(), viewer: a.team } : undefined,
     };
@@ -1394,6 +1534,13 @@ class Game {
 const game = new Game();
 game.boot().catch((e) => {
   console.error(e);
+  // Also report how far the shader cache got. "Too many programs" and "one bad shader" look identical in the message
+  // but need opposite fixes, and the count separates them.
+  let progs = '?';
+  // The program NAMES identify which material's shader was being built. three.js fills `name` with the material's
+  // shader identity, so the last name in the list is the one that took the context down.
+  try { progs = (game.R?.renderer?.info?.programs || []).map((p) => p.name || '?').join(' | ') || 'none'; } catch { /* renderer never built */ }
+  window.__beacon?.('boot', `programs=[${progs}] :: ` + ((e && e.stack) || e));   // reaches the dev server's log
   const el = document.getElementById('boot-error');
   if (el) { el.textContent = 'Something went wrong while loading: ' + e.message; el.style.display = 'block'; }
 });

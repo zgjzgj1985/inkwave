@@ -6,8 +6,8 @@
   "main": "electron/main.cjs",
   "scripts": {
     "start": "electron .",
-    "serve": "python3 tools/serve.py 8490",
-    "check": "for f in $(find src electron build tools server/src -name '*.js' -o -name '*.mjs' -o -name '*.cjs'); do node --check \"$f\" || exit 1; done && echo 'syntax ok'",
+    "serve": "node tools/py.mjs tools/serve.py",
+    "check": "node tools/check-syntax.mjs",
     "package": "electron-packager . INKWAVE --platform=darwin --arch=arm64,x64 --icon=build/icon.icns --app-bundle-id=local.inkwave.game --app-category-type=public.app-category.action-games --extend-info=build/extend-info.plist --darwin-dark-mode-support --asar.unpackDir=songs --out=dist --overwrite --ignore='^/(dist|build|node_modules|docs|tools|server|\\.botlab)(/|$)' --ignore='\\.DS_Store$'",
     "music": "node build/music-manifest.mjs",
     "prestart": "npm run -s music",
@@ -18,7 +18,7 @@
     "botlab": "tools/botlab/run.sh tools/botlab/match.cjs",
     "smoke": "./tools/smoke.sh",
     "net-test": "node tools/net-test.mjs",
-    "build": "python3 tools/build-dist.py",
+    "build": "node tools/py.mjs tools/build-dist.py",
     "release": "./tools/release-pages.sh",
     "deploy-relay": "cd server && wrangler deploy",
     "relay": "cd server && wrangler dev --ip 0.0.0.0 --port 8787"

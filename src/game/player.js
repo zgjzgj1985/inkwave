@@ -8,7 +8,7 @@
 // the crosshair is actually touching (at the height you aimed), so hits register exactly as they look.
 import * as THREE from 'three';
 import { G, clamp, lerp, angleDiff } from '../core/ctx.js';
-import { PLAYER, weaponRange } from '../config.js';
+import { PLAYER, TOUCH, weaponRange } from '../config.js';
 import { Physics, Hit } from './physics.js';
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _fwd = new THREE.Vector3(), _c = new THREE.Vector3();
@@ -44,16 +44,22 @@ export class PlayerController {
       // splatted in a live round: the TAB map still opens, to plan the Super Jump you'll take on respawn
       const m = G.match;
       const planning = !!(m && !a.alive && m.state === 'playing' && !m.paused);
-      this.mapHeld = planning && (inp.down('Tab') || inp.down('KeyM') || inp.padButton(8));
+      this.mapHeld = planning && (inp.down('Tab') || inp.down('KeyM') || inp.padButton(8) || inp.touch.map);
       if (planning) { this._checkQueue(); if (this.mapHeld) this._mapKeys(true); }
       else if (!m || m.state !== 'playing') this.jumpQueue = null;
       return;
     }
     const usingPad = !!inp.pad && inp.lastDevice === 'pad';
+    const touch = inp.touch;
+    // Touch takes the full-strength assist (the pad's tier), not the mouse's gentler opt-in: a thumb on glass is far
+    // less precise than a mouse. Note `lastDevice` is deliberately NOT consulted for this — adding a third device name
+    // to it would make a phone with a paired controller lose aim assist entirely the moment the screen is touched.
+    const assisted = usingPad || touch.active;
     // ---- aim assist target (computed from last frame's camera; cheap)
-    const as = this._assistTarget(usingPad ? (s.aimAssist ?? 1) : (s.aimAssistMouse ? 0.5 : 0));
+    const as = this._assistTarget(assisted ? (s.aimAssist ?? 1) : (s.aimAssistMouse ? 0.5 : 0));
     // ---- look
     const inv = s.invertY ? -1 : 1;
+    const tInv = s.touchInvertY ? -1 : 1;   // separate setting: the natural touch mapping is usually the mouse's opposite
     const friction = as ? lerp(1, 0.58, as.closeness * as.strength) : 1;
     let lookActive = false;
     const mdx = inp.mouse.dx, mdy = inp.mouse.dy;
@@ -75,12 +81,17 @@ export class PlayerController {
       return;
     }
     // while the map diorama is up the mouse / right stick steer the map cursor, not your camera
-    const mapUp = (G.rig?.mapK ?? 0) > 0.05 || inp.down('Tab') || inp.down('KeyM') || inp.padButton(8);
+    const mapUp = (G.rig?.mapK ?? 0) > 0.05 || inp.down('Tab') || inp.down('KeyM') || inp.padButton(8) || touch.map;
     const ldx = mapUp ? 0 : mdx, ldy = mapUp ? 0 : mdy;
     if (ldx || ldy) {
-      const sens = 0.0021 * (s.sensitivity ?? 1) * (s.aimAssistMouse ? friction : 1);
+      // A touch drag is bounded by the screen, so it carries its own gain (a full-width swipe has to be able to turn
+      // you around) and always gets the aim-assist friction. Pointer-lock counts are unbounded and keep the 1:1 feel,
+      // with friction only if aimAssistMouse opts in.
+      const sens = touch.active
+        ? TOUCH.lookSens * (s.touchSensitivity ?? 1) * friction
+        : 0.0021 * (s.sensitivity ?? 1) * (s.aimAssistMouse ? friction : 1);
       rig.yaw -= ldx * sens;
-      rig.pitch -= ldy * sens * inv;
+      rig.pitch -= ldy * sens * (touch.active ? tInv : inv);
       lookActive = true;
     }
     if (inp.pad && !mapUp) {
@@ -104,6 +115,7 @@ export class PlayerController {
     if (inp.down('KeyA') || inp.down('ArrowLeft')) mx -= 1;
     if (inp.down('KeyD') || inp.down('ArrowRight')) mx += 1;
     if (inp.pad) { inp.padStick(0, 1, _stick, 0.14, 0.95); mx += _stick.x; mz -= _stick.y; }
+    if (touch.active) { mx += touch.mx; mz += touch.mz; }   // left stick; already clamped to the rim by touch.js
     const ml = Math.hypot(mx, mz);
     if (ml > 1) { mx /= ml; mz /= ml; }
     // tracking assist: carry a share of the target's angular motion while the player is engaging (look or move input)
@@ -119,12 +131,12 @@ export class PlayerController {
     // forward = (sy, 0, cy); right = (-cy, 0, sy)
     it.move.set(sy * mz - cy * mx, 0, cy * mz + sy * mx);
 
-    it.jump = inp.down('Space') || inp.padButton(0);
-    it.squid = inp.down('ShiftLeft') || inp.down('ShiftRight') || inp.padValue(6) > 0.3;
+    it.jump = inp.down('Space') || inp.padButton(0) || inp.touchHeld('jump');
+    it.squid = inp.down('ShiftLeft') || inp.down('ShiftRight') || inp.padValue(6) > 0.3 || inp.touchHeld('squid');
     it.fire = inp.mouse.left || inp.padValue(7) > 0.3;
     it.sub = inp.mouse.right || inp.down('KeyE') || inp.padButton(5);
-    it.special = inp.down('KeyF') || inp.down('KeyQ') || inp.padButton(3) || inp.padButton(11);
-    this.mapHeld = inp.down('Tab') || inp.down('KeyM') || inp.padButton(8);
+    it.special = inp.down('KeyF') || inp.down('KeyQ') || inp.padButton(3) || inp.padButton(11) || inp.touchHeld('special');
+    this.mapHeld = inp.down('Tab') || inp.down('KeyM') || inp.padButton(8) || touch.map;
     // "Yeah!" signal (C / d-pad up outside the map): cheers on a teammate's Cheer Orb
     if (inp.wasPressed('KeyC') || (!this.mapHeld && inp.padPressed.has(12))) it.cheer = true;
     // the TAB map is a targeting UI (clicking a teammate beacon super jumps) — never fire or throw through it

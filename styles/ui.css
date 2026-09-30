@@ -1,4 +1,5 @@
 @import url('hud.css');
+@import url('touch.css');
 /* =====================================================================================
    INKWAVE — UI (menus + HUD). Everything is namespaced .iw-*.
    Sizing unit --u = 1/100 of a 16:9 frame fitted to the viewport (16px at 1600x900).
@@ -8,7 +9,7 @@
 
 #ui-root { position: fixed; inset: 0; z-index: 10; pointer-events: none; overflow: hidden; user-select: none; -webkit-user-select: none; }
 
-.iw-ui, .iw-hud, .iw-hud-over {
+.iw-ui, .iw-hud, .iw-hud-over, .iw-touch {
   --u: min(1vw, 1.7778vh);
   --k: #15121c; --k2: #1f1a2c; --k3: #2c2540;
   --muted: #c3bdd6;

@@ -93,10 +93,31 @@ export function createLevelMaterial(paintTexture, atlasSize, muralTexture = null
     uniforms.tNormal = { value: lib.normal };
     uniforms.tOrm = { value: lib.orm };
     uniforms.uTexSize = { value: lib.stats?.size || 512 };
-    uniforms.uTL = { value: map.map((n) => new THREE.Vector4(L[n] ?? 0, 1 / ((M[n] && M[n].scale) || 4), (M[n] && M[n].mode) ?? 1, (M[n] && M[n].sym) ?? 7)) };
-    uniforms.uTLt = { value: map.map((n, i) => new THREE.Vector4(M[n] && M[n].mask ? 2 : (M[n] && M[n].tint === false ? 0 : 1), n === 'grate' ? 0.6 : 1.0, onWall[i] ?? i, onTop[i] ?? i)) };
-    // stair / ramp slots (meta.stair): top faces are sampled in the ramp's own frame, phase-locked so whole steps fit
-    uniforms.uTLs = { value: map.map((n) => new THREE.Vector4(...((M[n] && M[n].stair) || [0, 0, 0, 0]))) };
+    // The three per-slot tables live in ONE float texture, not three uniform arrays.
+    //
+    // GLSL ES rounds every array element up to a full vec4 uniform slot whatever its type, so `uTL[50] + uTLt[50] +
+    // uTLs[50]` alone cost 150 of a phone's 256 fragment uniform vectors. Add the wake (60), mural (36) and lamp (12)
+    // tables and the level shader went over the limit and FAILED TO LINK on an Adreno 730 — the ground and the sea
+    // simply were not drawn, while a desktop GPU (1024 slots) never showed a symptom. A texture costs one sampler.
+    //
+    // Rows: 0 = uTL (layer, 1/scale, anti-tiling mode, sym), 1 = uTLt (tint mode, grate, onWall, onTop), 2 = uTLs (stair).
+    const tlRows = [
+      map.map((n) => [L[n] ?? 0, 1 / ((M[n] && M[n].scale) || 4), (M[n] && M[n].mode) ?? 1, (M[n] && M[n].sym) ?? 7]),
+      map.map((n, i) => [M[n] && M[n].mask ? 2 : (M[n] && M[n].tint === false ? 0 : 1), n === 'grate' ? 0.6 : 1.0, onWall[i] ?? i, onTop[i] ?? i]),
+      map.map((n) => { const st = (M[n] && M[n].stair) || [0, 0, 0, 0]; return [st[0], st[1], st[2], st[3]]; }),
+    ];
+    const tlData = new Float32Array(map.length * 3 * 4);
+    for (let row = 0; row < 3; row++) {
+      for (let i = 0; i < map.length; i++) {
+        const o = (row * map.length + i) * 4, r = tlRows[row][i];
+        tlData[o] = r[0]; tlData[o + 1] = r[1]; tlData[o + 2] = r[2]; tlData[o + 3] = r[3];
+      }
+    }
+    const tlTex = new THREE.DataTexture(tlData, map.length, 3, THREE.RGBAFormat, THREE.FloatType);
+    tlTex.magFilter = tlTex.minFilter = THREE.NearestFilter;   // exact texel fetch: no interpolation, no mips
+    tlTex.generateMipmaps = false;
+    tlTex.needsUpdate = true;
+    uniforms.uTLTex = { value: tlTex };
     uniforms.uGel.value = L.gel ?? -1;
     mat.defines = { ...(mat.defines || {}), USE_TEXLIB: 1, TL_SLOTS: map.length };
   }
@@ -205,9 +226,10 @@ uniform sampler2DArray tAlbedo;
 uniform sampler2DArray tNormal;
 uniform sampler2DArray tOrm;
 uniform float uTexSize;
-uniform vec4 uTL[TL_SLOTS];
-uniform vec4 uTLt[TL_SLOTS];
-uniform vec4 uTLs[TL_SLOTS];
+uniform sampler2D uTLTex;   // the uTL / uTLt / uTLs tables as one float texture (row 0 / 1 / 2) — see createLevelMaterial
+vec4 tlSlot(int i, int row) {
+  return texture2D(uTLTex, vec2((float(i) + 0.5) / float(TL_SLOTS), (float(row) + 0.5) / 3.0));
+}
 ${TEXLIB_GLSL}
 #endif
 uniform vec4 uMurA[12];
@@ -294,12 +316,12 @@ float gWake = 0.0;`)
     int pid = int(pattern + 0.5);
     bool vertical = abs(vWNorm.y) < 0.5;
     // per-slot remaps: ramp / asphalt / yard sides → concrete, car-deck edge → plating, gelcoat tops → planks
-    if (vertical) pid = int(uTLt[pid].z + 0.5); else if (vWNorm.y > 0.5) pid = int(uTLt[pid].w + 0.5);
-    vec4 tl = uTL[pid]; vec4 tt = uTLt[pid];
+    if (vertical) pid = int(tlSlot(pid, 1).z + 0.5); else if (vWNorm.y > 0.5) pid = int(tlSlot(pid, 1).w + 0.5);
+    vec4 tl = tlSlot(pid, 0); vec4 tt = tlSlot(pid, 1);
     // stairs / ramps: sample in the ramp's own frame — u across, v downhill from the top landing — with v phase-locked so
     // a whole number of steps fits the visible flight (the slab runs 0.6 m on under the floor at its low end, level.js)
     vec2 tuv = fu * tl.y;
-    vec4 sp = uTLs[pid];
+    vec4 sp = tlSlot(pid, 2);
     vec2 tA = vec2(1.0, 0.0), tD = vec2(0.0, 1.0);
     if (sp.x > 0.0 && vWNorm.y > 0.5) {
       bool alongU = abs(vFaceTan.y) > 0.02;                                   // x-running ramps: face u runs up/down the slope

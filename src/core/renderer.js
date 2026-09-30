@@ -9,8 +9,9 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
-import { QUALITY } from '../config.js';
+import { QUALITY, rendererQuality } from '../config.js';
 import { G } from './ctx.js';
+import { shouldUseTouch } from './touch.js';
 
 const BLOOM = [0.28, 0.45, 2.4];   // default bloom: strength, radius, HDR threshold
 
@@ -99,7 +100,8 @@ export class Renderer {
     this.container = container;
     this.scene = null; this.camera = null;
     this.settings = settings;
-    this.q = QUALITY[settings.quality] || QUALITY.high;
+    this.touch = shouldUseTouch(settings);
+    this.q = rendererQuality(settings, this.touch);
     this._w = 0; this._h = 0;
   }
 
@@ -116,8 +118,12 @@ export class Renderer {
     r.setPixelRatio(pr);
     const w = window.innerWidth, h = window.innerHeight;
     r.setSize(w, h);
-    // effective MSAA sample count (also read by the showcase for its private target)
-    this.samples = this.appleGPU ? 0 : q.msaa || 0;
+    // MSAA is skipped where it costs the most. On Apple GPUs a multisampled half-float target is brutally slow; on a
+    // touch device it is the most bandwidth-hungry object in the frame and a phone has the least bandwidth to give.
+    // The trade is worth making because MSAA charges every frame for an edge-smoothing benefit that a single
+    // full-screen SMAA pass (added below) delivers for a fraction of the cost.
+    this.noMSAA = this.appleGPU || this.touch;
+    this.samples = this.noMSAA ? 0 : q.msaa || 0;
     const rt = new THREE.WebGLRenderTarget(w * pr, h * pr, { type: THREE.HalfFloatType, samples: this.samples });
     const comp = (this.composer = new EffectComposer(r, rt));
     comp.setPixelRatio(pr);
@@ -161,7 +167,8 @@ export class Renderer {
   applySettings(settings) {
     const prevQ = this.q;
     this.settings = settings;
-    this.q = QUALITY[settings.quality] || QUALITY.high;
+    this.touch = shouldUseTouch(settings);
+    this.q = rendererQuality(settings, this.touch);
     const shadowChanged = this.renderer.shadowMap.enabled !== (settings.shadows !== false);
     if (prevQ !== this.q || shadowChanged) {
       if (prevQ !== this.q) this.dynScale = 1;
@@ -171,8 +178,15 @@ export class Renderer {
     if (this.bloom) this.bloom.enabled = !!(this.q.bloom && settings.bloom);
   }
 
-  // Lowest dynamic scale: never below 0.75 of CSS-pixel density, so Retina screens (preset density > 1) can give more back.
+  // Lowest dynamic scale: never below 0.75 of CSS-pixel density, so Retina screens (preset density > 1) can give
+  // more back.
+  //
+  // Touch devices get no reduction at all, because on them the trade is close to pure loss: this scene is
+  // vertex-bound, not fill-bound, so quadrupling the pixel count (0.5 -> 1.0) measured only 42 -> 39 fps, while the
+  // halved density is immediately visible as blur on a 3x screen. Reducing resolution bought ~3 frames and cost the
+  // whole image.
   dynFloor() {
+    if (this.touch) return 1;
     const base = Math.min(window.devicePixelRatio || 1, this.q.pixelRatio);
     return Math.max(0.5, Math.min(0.75, 0.75 / base));
   }

@@ -2,6 +2,7 @@
 // usage: node tools/shot.mjs <url> <out.png> [--w 1600] [--h 900] [--wait 2500] [--eval "js expr"] [--evalAfter "js"] [--waitAfter 1000]
 // Prints console errors/warnings from the page. Uses the system Chrome with GPU (ANGLE/Metal) so WebGL renders.
 import puppeteer from 'puppeteer-core';
+import { chromePath, gpuArgs } from './chrome.mjs';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -16,9 +17,9 @@ const evalAfter = opt('evalAfter', null);
 const waitAfter = +opt('waitAfter', 800);
 
 const browser = await puppeteer.launch({
-  executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  executablePath: chromePath(),
   headless: 'new',
-  args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', `--window-size=${W},${H}`],
+  args: gpuArgs([`--window-size=${W},${H}`]),
   defaultViewport: { width: W, height: H, deviceScaleFactor: 1 },
 });
 const page = await browser.newPage();

@@ -8,8 +8,10 @@
 // LUFS-M max (BS.1770 K-weighted, 400 ms), integrated LUFS (music), DC offset, NaN count, clipped samples (>0.99),
 // clicks (sample-step outliers vs local activity), start/tail level, spectral balance (low <250, lmid <2k, hmid <6k, high).
 import puppeteer from 'puppeteer-core';
+import { chromePath, gpuArgs } from './chrome.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf('--' + k); return i >= 0 ? args[i + 1] : d; };
@@ -18,7 +20,7 @@ const ONLY = opt('only', '');
 const BARS = +opt('bars', 16);
 const WAV = opt('wav', '');
 const JSON_OUT = opt('json', '');
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // ---- contract names straight from docs/CONTRACTS.md ----
 const contracts = fs.readFileSync(path.join(ROOT, 'docs/CONTRACTS.md'), 'utf8');
@@ -26,7 +28,7 @@ const sec = contracts.slice(contracts.indexOf('SFX names (all must exist)'), con
 const CONTRACT_NAMES = [...sec.matchAll(/`([^`]+)`/g)].flatMap((m) => m[1].replace(/\([^)]*\)/g, ' ').split(/\s+/)).filter(Boolean);
 
 const browser = await puppeteer.launch({
-  executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  executablePath: chromePath(),
   headless: 'new',
   args: ['--autoplay-policy=no-user-gesture-required', '--no-sandbox'],
   protocolTimeout: 1800000,

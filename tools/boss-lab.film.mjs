@@ -2,6 +2,7 @@
 // usage: node tools/boss-lab.film.mjs <jobs.json | inline-json> [--out /private/tmp/boss/art] [--w 1600 --h 900]
 // job: { name, go: {preset, t, cam, phase, light, q, ...}, shot?: true, film?: {n, dt, cols, w, h}, eval?: "js" }
 import puppeteer from 'puppeteer-core';
+import { chromePath, gpuArgs } from './chrome.mjs';
 import { mkdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
@@ -19,9 +20,9 @@ process.on('uncaughtException', async (e) => { console.error(e); await kill(); p
 
 try {
   browser = await puppeteer.launch({
-    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    executablePath: chromePath(),
     headless: 'new',
-    args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', `--window-size=${W},${H}`],
+    args: gpuArgs([`--window-size=${W},${H}`]),
     defaultViewport: { width: W, height: H, deviceScaleFactor: 1 },
   });
   const page = await browser.newPage();
