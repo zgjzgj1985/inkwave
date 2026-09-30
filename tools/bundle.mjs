@@ -5,9 +5,7 @@
 // over a tunnel (~1.2 s RTT) the 160-request load turns into minutes of waiting, while the same load is instant on
 // the LAN. Bundling collapses it to a handful of requests.
 //
-// Output goes to dist/src/main.js — deliberately the SAME path as the unbundled entry point. The sources build asset
-// URLs as `new URL('../../assets/…', import.meta.url)`, and those resolve identically from /src/main.js as they do
-// from /src/game/… (both climb to the server root and then into /assets/), so the assets keep working untouched.
+// Output goes to src/game/main.js — see BUNDLE below for why that exact depth is load-bearing.
 //
 // usage: node tools/bundle.mjs [--out dist]
 import { build } from 'esbuild';
@@ -18,6 +16,12 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const OUT = (() => { const i = args.indexOf('--out'); return i >= 0 ? args[i + 1] : 'dist'; })();
+// The bundle lands at src/game/ — DEPTH 2 — on purpose. The sources build asset URLs as
+// new URL('../../assets/…', import.meta.url) and every one of them sits at depth 2 (src/game, src/ui, src/boss,
+// src/world), so '../../' is written to land exactly on the SITE ROOT. From depth 1 it overshoots and clamps to
+// '/assets/…', which still works when the site is served from '/', but 404s the moment it is served from a
+// sub-path — GitHub Pages project sites serve at /<repo>/. Same depth, both work.
+const BUNDLE = path.join('src', 'game', 'main.js');
 
 const dist = path.join(ROOT, OUT);
 if (!fs.existsSync(path.join(dist, 'index.html'))) {
@@ -38,7 +42,7 @@ const threePaths = {
 
 const result = await build({
   entryPoints: [path.join(ROOT, 'src/main.js')],
-  outfile: path.join(dist, 'src/main.js'),
+  outfile: path.join(dist, BUNDLE),
   bundle: true,
   format: 'esm',
   splitting: false,          // one file, so the browser makes one request instead of a chunk waterfall
@@ -55,21 +59,34 @@ const result = await build({
 });
 
 // Anything left as a runtime import() would reintroduce a request waterfall — fail loudly rather than ship one.
-const out = fs.readFileSync(path.join(dist, 'src/main.js'), 'utf8');
+const out = fs.readFileSync(path.join(dist, BUNDLE), 'utf8');
 const dyn = out.match(/import\s*\(/g);
-const size = (fs.statSync(path.join(dist, 'src/main.js')).size / 1048576).toFixed(2);
+const size = (fs.statSync(path.join(dist, BUNDLE)).size / 1048576).toFixed(2);
 
 // The per-module tree is now dead weight in dist, and the browser would still be able to fetch it. Hold on to the
 // bundle and its map first — both live under the directory being removed.
-const mapFile = path.join(dist, 'src/main.js.map');
+const mapFile = path.join(dist, BUNDLE + '.map');
 const map = fs.existsSync(mapFile) ? fs.readFileSync(mapFile, 'utf8') : null;
 fs.rmSync(path.join(dist, 'src'), { recursive: true, force: true });
-fs.mkdirSync(path.join(dist, 'src'), { recursive: true });
-fs.writeFileSync(path.join(dist, 'src/main.js'), out);
+fs.mkdirSync(path.dirname(path.join(dist, BUNDLE)), { recursive: true });   // BUNDLE is nested (src/game), not one level deep
+fs.writeFileSync(path.join(dist, BUNDLE), out);
 if (map) fs.writeFileSync(mapFile, map);
 // three ships bundled inside the single file now, so the vendored copies and the import map are unused.
 fs.rmSync(path.join(dist, 'vendor'), { recursive: true, force: true });
 
-console.log(`bundled -> ${OUT}/src/main.js  ${size} MB (minified, single file)`);
+// index.html still points at the unbundled ./src/main.js and carries an import map for a vendor/ tree that no longer
+// exists. Repoint it at the bundle and drop the import map — leaving it would be a stale reference to deleted files
+// (inert today, because the bundle resolves everything statically, but a trap for whoever reads it next).
+const indexPath = path.join(dist, 'index.html');
+let html = fs.readFileSync(indexPath, 'utf8');
+html = html.replace(/<script type="importmap">[\s\S]*?<\/script>\s*/i, '');
+html = html.replace(
+  /(<script type="module" src=")\.\/src\/main\.js(")/i,
+  (_m, a, b) => a + './' + BUNDLE.split(path.sep).join('/') + b,
+);
+fs.writeFileSync(indexPath, html);
+console.log(`index.html -> ${(/src="([^"]*main\.js)"/.exec(html) || [, '?'])[1]}  (importmap present: ${/importmap/i.test(html)})`);
+
+console.log(`bundled -> ${OUT}/${BUNDLE}  ${size} MB (minified, single file)`);
 if (dyn) console.log(`  note: ${dyn.length} dynamic import() call(s) remain — check they are not a waterfall`);
 if (result.warnings?.length) for (const w of result.warnings) console.log('  warn:', w.text);

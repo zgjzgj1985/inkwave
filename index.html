@@ -48,7 +48,19 @@
   // server's log (tools/serve.py logs every 4xx together with its path), which is enough to diagnose the device from
   // the machine serving it. Deliberately in index.html rather than main.js: this way it also catches a failure while
   // the module itself is still loading.
+  // Only on a host where a dev server is actually listening for it. The beacon works by requesting a path that cannot
+  // exist and relying on tools/serve.py logging every 4xx — on a public host that is just a wasted request and a red
+  // console line on every load. `?beacon` forces it on for a device test against a real deployment.
+  const BEACON_ON = (() => {
+    try {
+      const h = location.hostname;
+      if (new URLSearchParams(location.search).has('beacon')) return true;
+      return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h.endsWith('.local')
+        || /^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(h);
+    } catch (e) { return false; }
+  })();
   window.__beacon = (kind, msg) => {
+    if (!BEACON_ON) return;
     // Truncate BEFORE encoding: percent-encoding inflates a stack trace roughly threefold, so slicing the encoded
     // form (as this first did) cut it to a third of the intended length.
     try { fetch('/__inkwave_error/' + encodeURIComponent((kind + ': ' + String(msg)).slice(0, 1800))).catch(() => {}); } catch (e) { /* give up quietly */ }
