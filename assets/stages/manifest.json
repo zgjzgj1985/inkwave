@@ -1,0 +1,83 @@
+{
+  "tidewater": {
+    "day": {
+      "src": "assets/stages/tidewater-day.webp",
+      "sm": "assets/stages/tidewater-day-sm.webp"
+    },
+    "dusk": {
+      "src": "assets/stages/tidewater-dusk.webp",
+      "sm": "assets/stages/tidewater-dusk-sm.webp"
+    }
+  },
+  "kelpline": {
+    "day": {
+      "src": "assets/stages/kelpline-day.webp",
+      "sm": "assets/stages/kelpline-day-sm.webp"
+    },
+    "dusk": {
+      "src": "assets/stages/kelpline-dusk.webp",
+      "sm": "assets/stages/kelpline-dusk-sm.webp"
+    }
+  },
+  "halyard": {
+    "day": {
+      "src": "assets/stages/halyard-day.webp",
+      "sm": "assets/stages/halyard-day-sm.webp"
+    },
+    "dusk": {
+      "src": "assets/stages/halyard-dusk.webp",
+      "sm": "assets/stages/halyard-dusk-sm.webp"
+    }
+  },
+  "saltpan": {
+    "day": {
+      "src": "assets/stages/saltpan-day.webp",
+      "sm": "assets/stages/saltpan-day-sm.webp"
+    },
+    "dusk": {
+      "src": "assets/stages/saltpan-dusk.webp",
+      "sm": "assets/stages/saltpan-dusk-sm.webp"
+    }
+  },
+  "crossmarket": {
+    "day": {
+      "src": "assets/stages/crossmarket-day.webp",
+      "sm": "assets/stages/crossmarket-day-sm.webp"
+    },
+    "dusk": {
+      "src": "assets/stages/crossmarket-dusk.webp",
+      "sm": "assets/stages/crossmarket-dusk-sm.webp"
+    }
+  },
+  "lockgate": {
+    "day": {
+      "src": "assets/stages/lockgate-day.webp",
+      "sm": "assets/stages/lockgate-day-sm.webp"
+    },
+    "dusk": {
+      "src": "assets/stages/lockgate-dusk.webp",
+      "sm": "assets/stages/lockgate-dusk-sm.webp"
+    }
+  },
+  "terraces": {
+    "day": {
+      "src": "assets/stages/terraces-day.webp",
+      "sm": "assets/stages/terraces-day-sm.webp"
+    },
+    "dusk": {
+      "src": "assets/stages/terraces-dusk.webp",
+      "sm": "assets/stages/terraces-dusk-sm.webp"
+    }
+  },
+  "cargo": {
+    "day": {
+      "src": "assets/stages/cargo-day.webp",
+      "sm": "assets/stages/cargo-day-sm.webp"
+    },
+    "dusk": {
+      "src": "assets/stages/cargo-dusk.webp",
+      "sm": "assets/stages/cargo-dusk-sm.webp"
+    }
+  },
+  "generated": "2026-09-27T20:11:01.803Z"
+}

@@ -1,0 +1,91 @@
+/* On-screen touch controls (src/core/touch.js).
+   Sizes and positions are computed and written in JS — layout and hit-testing share one set of numbers so they cannot
+   drift apart — and this file only paints. That is also why nothing here uses --u: the UI scale token collapses to
+   under half its design size on a phone, which would leave the buttons too small to hit. The short screen edge drives
+   the cluster instead. */
+
+/* The layer is always present once touch mode is on; the controls inside it are gated on the match being live. */
+.iw-touch {
+  z-index: 15;                 /* over the HUD (10), under the menu layer (20) and the overlays (30) */
+  pointer-events: none;        /* every listener lives on window with geometric hit-testing */
+  -webkit-touch-callout: none;
+}
+
+/* ---- buttons ---- */
+.iw-touch__btn {
+  position: absolute; left: 0; top: 0;   /* moved by transform from JS */
+  display: grid; place-items: center;
+  border-radius: 50%;
+  font: 900 clamp(9px, 2.5vmin, 15px) / 1 'Rubik', system-ui, sans-serif;
+  letter-spacing: .06em;
+  color: #fff;
+  background: rgba(21, 18, 28, .34);
+  border: 2px solid rgba(255, 255, 255, .38);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .22);
+  backdrop-filter: blur(2px);
+  transition: background .1s, border-color .1s, scale .07s var(--out), opacity .16s var(--out), visibility 0s linear .16s;
+  scale: 1;
+  opacity: 0; visibility: hidden;
+}
+.iw-touch.is-live .iw-touch__btn { opacity: 1; visibility: visible; transition: background .1s, border-color .1s, scale .07s var(--out), opacity .16s var(--out), visibility 0s; }
+.iw-touch__btn.is-down { background: rgba(255, 255, 255, .30); border-color: rgba(255, 255, 255, .8); scale: .92; }
+.iw-touch__btn.is-on { background: rgba(255, 138, 20, .55); border-color: var(--a, #ff8a14); color: var(--a-ink, #15121c); }
+
+/* the fire button doubles as a look origin, so it is the one control that reads as a target rather than a label */
+.iw-touch__btn.is-fire { background: rgba(255, 138, 20, .40); border-color: rgba(255, 255, 255, .55); border-width: 3px; }
+.iw-touch__btn.is-fire::after {
+  content: ''; width: 42%; height: 42%; border-radius: 50%;
+  background: rgba(255, 255, 255, .82);
+  transition: scale .07s var(--out);
+}
+.iw-touch__btn.is-fire.is-down { background: rgba(255, 138, 20, .78); }
+.iw-touch__btn.is-fire.is-down::after { scale: .68; }
+
+.iw-touch__btn.is-small { font-size: clamp(7px, 1.9vmin, 11px); }
+
+/* ---- movement stick (appears where the thumb lands) ---- */
+.iw-touch__stick {
+  position: absolute; left: 0; top: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .26);
+  background: rgba(21, 18, 28, .20);
+  opacity: 0; transition: opacity .12s var(--out);
+}
+.iw-touch__stick.is-on { opacity: 1; }
+.iw-touch__stick > i {
+  position: absolute; left: 50%; top: 50%;
+  width: 46%; height: 46%; margin: -23% 0 0 -23%;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .70);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+}
+
+/* ---- portrait gate ----
+   The game is a 4v4 shooter: a portrait viewport puts the horizontal FOV in the floor and there is nowhere to put two
+   thumbs. Rather than ship an unplayable layout, cover the screen and ask for the rotation. */
+.iw-touch-rotate { display: none; }
+/* `.is-armed` is set by TouchControls.update() only while a menu screen or a match is underneath — never over the
+   loading screen (see core/touch.js). */
+@media (orientation: portrait) {
+  /* A BANNER, not a wall. An earlier version covered the whole screen — which locked a player out completely if their
+     phone did not rotate with them (rotation locked, lying down, in a car). A hint may not be the only way out of the
+     state it is warning about, so this one is `pointer-events: none` and leaves the screen usable underneath. */
+  .iw-touch-rotate.is-armed {
+    display: flex; align-items: center; justify-content: center;
+    position: absolute; left: 0; right: 0; top: 0;
+    z-index: 80;                 /* over every menu layer — but see pointer-events above */
+    pointer-events: none;
+    background: rgba(13, 16, 32, .93);
+    padding: 1.5vmin 3vmin;
+    gap: 2.4vmin; text-align: center;
+  }
+  .iw-touch-rotate.is-armed > div { display: flex; align-items: center; gap: 2.4vmin; }
+  .iw-touch-rotate b { font: 400 4.2vmin/1.1 'Titan One', 'Rubik', sans-serif; letter-spacing: .02em; }
+  .iw-touch-rotate span { font: 600 3vmin/1.3 'Rubik', sans-serif; color: #c3bdd6; }
+  .iw-touch-rotate i { font-size: 4.6vmin; font-style: normal; animation: iw-tc-turn 1.8s var(--spring) infinite; }
+}
+@keyframes iw-tc-turn {
+  0%, 35% { rotate: 0deg; }
+  65%, 100% { rotate: 90deg; }
+}
+@media (prefers-reduced-motion: reduce) { .iw-touch-rotate i { animation: none; rotate: 90deg; } }
