@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>INKWAVE — GPU capability triage</title>
+<script type="importmap">
+{ "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/jsm/" } }
+</script>
+<style>
+  html, body { margin: 0; height: 100%; background: #12101c; color: #eee; font: 600 15px/1.5 system-ui, sans-serif; }
+  #log { padding: 16px 18px; white-space: pre-wrap; word-break: break-word; }
+  .ok { color: #6ee7a8; } .bad { color: #ff7b8a; } .dim { color: #8b86a3; } .head { color: #ffc48a; }
+</style>
+</head>
+<body>
+<div id="log">starting…</div>
+<script type="module">
+// Which single WebGL2 capability takes the context down on this device?
+//
+// The game loses its context during boot on some Android GPUs and every round of "try the whole game again with one
+// feature disabled" costs a device test. This page bisects instead: it exercises the features the renderer actually
+// depends on, one at a time, and stops at the first that kills the context. Each step is reported through the same
+// remote beacon the game uses (a GET to a path that cannot exist, which tools/serve.py logs), so the answer arrives
+// without a console on the device.
+const L = document.getElementById('log');
+const lines = [];
+function say(msg, cls = '') { lines.push(`<span class="${cls}">${msg}</span>`); L.innerHTML = lines.join('\n'); }
+function beacon(kind, msg) {
+  try { fetch('/__inkwave_error/' + encodeURIComponent((kind + ': ' + String(msg)).slice(0, 1800))).catch(() => {}); } catch (e) {}
+}
+const raf = () => new Promise((r) => requestAnimationFrame(() => r()));
+
+const canvas = document.createElement('canvas');
+canvas.width = 360; canvas.height = 640;
+let gl = canvas.getContext('webgl2', { antialias: false, powerPreference: 'high-performance' });
+if (!gl) { say('no webgl2 context at all', 'bad'); beacon('probe', 'FAIL: no WebGL2 context'); throw new Error('no webgl2'); }
+
+let lost = false;
+canvas.addEventListener('webglcontextlost', () => { lost = true; }, false);
+
+function limits() {
+  const g = (k) => gl.getParameter(gl[k]);
+  return { renderer: g('RENDERER'), vUniform: g('MAX_VERTEX_UNIFORM_VECTORS'), fUniform: g('MAX_FRAGMENT_UNIFORM_VECTORS'), varyings: g('MAX_VARYING_VECTORS'), maxTex: g('MAX_TEXTURE_SIZE'), maxRb: g('MAX_RENDERBUFFER_SIZE'), samples: g('MAX_SAMPLES') };
+}
+say('renderer: ' + limits().renderer, 'dim');
+// Extensions the renderer actually needs. EXT_color_buffer_float in particular is not optional for WebGL2: without it
+// a half-float colour attachment makes the framebuffer incomplete, and three.js renders the whole frame through a
+// half-float target.
+const EXTS = ['EXT_color_buffer_float', 'EXT_color_buffer_half_float', 'OES_texture_float_linear', 'EXT_float_blend', 'KHR_parallel_shader_compile', 'WEBGL_debug_renderer_info'];
+const ext = {};
+for (const e of EXTS) ext[e] = !!gl.getExtension(e);
+say('ext: ' + EXTS.map((e) => e.replace(/^(EXT|OES|KHR|WEBGL)_/, '') + '=' + (ext[e] ? 'y' : 'n')).join(' '), ext.EXT_color_buffer_float ? 'dim' : 'bad');
+beacon('probe-start', JSON.stringify({ ...limits(), ext }));
+
+const VS = `#version 300 es
+in vec2 p; out vec2 vUv; void main(){ vUv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
+
+function makeProg(fragBody) {
+  const fs = `#version 300 es\nprecision highp float;\nin vec2 vUv;\nout vec4 outColor;\n${fragBody}`;
+  const v = gl.createShader(gl.VERTEX_SHADER), f = gl.createShader(gl.FRAGMENT_SHADER);
+  if (!v || !f) return { err: 'createShader returned null' };
+  gl.shaderSource(v, VS); gl.compileShader(v);
+  gl.shaderSource(f, fs); gl.compileShader(f);
+  const p = gl.createProgram();
+  if (!p) return { err: 'createProgram returned null' };
+  gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
+  const ok = gl.getProgramParameter(p, gl.LINK_STATUS);
+  return ok ? { prog: p, err: null } : { err: 'link failed: ' + (gl.getProgramInfoLog(p) || '').slice(0, 120) };
+}
+
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+
+function drawTo(target) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+  gl.viewport(0, 0, target ? target._w : canvas.width, target ? target._h : canvas.height);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+async function step(name, fn) {
+  say('· ' + name, 'dim');
+  await raf();
+  let out;
+  try { out = fn(); } catch (e) { out = { err: e.message }; }
+  // let the GPU actually chew on it before asking whether it survived
+  await raf(); await raf();
+  const err = gl.getError();
+  if (lost || gl.isContextLost()) {
+    say('  ✗ CONTEXT LOST at: ' + name, 'bad');
+    beacon('probe', 'CONTEXT LOST at step: ' + name + ' | err=' + err + (out && out.err ? ' | ' + out.err : ''));
+    throw new Error('context lost');
+  }
+  if (out && out.err) { say('  ✗ ' + out.err, 'bad'); beacon('probe', 'STEP FAILED: ' + name + ' | ' + out.err); return false; }
+  say('  ✓ ok' + (err ? ' (gl error ' + err + ')' : ''), 'ok');
+  return true;
+}
+
+// ---- the capabilities the renderer depends on, cheapest first ------------------------------------------------------
+const FRAG_PLAIN = `void main(){ outColor = vec4(vUv, 0.0, 1.0); }`;
+const FRAG_LOOP = `uniform sampler2D t;
+void main(){
+  // the shape the sky shader uses: textureLod inside a fixed 6-iteration loop
+  float acc = 0.0;
+  for (int k = 0; k < 6; k++) { acc += textureLod(t, vUv + vec2(float(k)) * 0.01, 0.0).a; }
+  outColor = vec4(acc / 6.0);
+}`;
+
+let prog = null;
+await step('compile + link a plain GLSL3 program', () => {
+  const r = makeProg(FRAG_PLAIN);
+  if (r.err) return r;
+  prog = r.prog;
+  gl.useProgram(prog);
+  const loc = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  return {};
+});
+await step('draw to the default framebuffer', () => { drawTo(null); return {}; });
+
+await step('create a half-float RGBA colour texture', () => {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 256, 256, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  return {};
+});
+
+await step('render into a 1024x1024 half-float target', () => {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 1024, 1024, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+  const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  if (st !== gl.FRAMEBUFFER_COMPLETE) return { err: 'incomplete framebuffer ' + st };
+  fb._w = fb._h = 1024;
+  gl.useProgram(prog); drawTo(fb);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return {};
+});
+
+await step('render into a 2048x2048 half-float target (the paint-atlas shape)', () => {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 2048, 2048, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+  const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  if (st !== gl.FRAMEBUFFER_COMPLETE) return { err: 'incomplete framebuffer ' + st };
+  fb._w = fb._h = 2048;
+  gl.useProgram(prog); drawTo(fb);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return {};
+});
+
+await step('a textureLod loop shader (the sky-shader shape)', () => {
+  const r = makeProg(FRAG_LOOP);
+  if (r.err) return r;
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 2048, 640, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.useProgram(r.prog);
+  const loc = gl.getAttribLocation(r.prog, 'p');
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.uniform1i(gl.getUniformLocation(r.prog, 't'), 0);
+  drawTo(null);
+  gl.useProgram(prog);
+  return {};
+});
+
+await step('a 4x multisampled half-float target', () => {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 512, 512, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+  fb._w = fb._h = 512;
+  gl.useProgram(prog); drawTo(fb);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return {};
+});
+
+// ---- three.js layer ---------------------------------------------------------------------------------------------
+const THREE = await import('/vendor/three/build/three.module.js').catch(() => null);
+if (!THREE) { say('! three.js not reachable (served from the repo root, expected on the dev server)', 'dim'); }
+else {
+  let r3 = null, scene = null, cam = null;
+  await step('three.js WebGLRenderer on this context generation', () => {
+    r3 = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', stencil: false });
+    r3.setSize(240, 400);
+    scene = new THREE.Scene();
+    cam = new THREE.PerspectiveCamera(70, 240 / 400, 0.1, 100); cam.position.z = 3;
+    return {};
+  });
+  await step('a standard material with lights + shadows', () => {
+    scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0xff8a14 })));
+    const d = new THREE.DirectionalLight(0xffffff, 2); d.castShadow = true; scene.add(d);
+    scene.add(new THREE.HemisphereLight(0x88aaff, 0x442200, 1));
+    r3.render(scene, cam);
+    return {};
+  });
+  await step('an EffectComposer pass chain (halffloat HDR target)', async () => {
+    const { EffectComposer } = await import('/vendor/three/jsm/postprocessing/EffectComposer.js');
+    const { RenderPass } = await import('/vendor/three/jsm/postprocessing/RenderPass.js');
+    const rt = new THREE.WebGLRenderTarget(240, 400, { type: THREE.HalfFloatType });
+    const c = new EffectComposer(r3, rt); c.addPass(new RenderPass(scene, cam));
+    c.render(); return {};
+  });
+  await step('PMREMGenerator.fromScene (the sky env bake)', async () => {
+    const pm = new THREE.PMREMGenerator(r3);
+    const s = new THREE.Scene();
+    s.add(new THREE.Mesh(new THREE.SphereGeometry(1, 24, 12), new THREE.MeshBasicMaterial({ color: 0x3366ff, side: THREE.BackSide })));
+    const rt = pm.fromScene(s, 0, 0.1, 100, { size: 256 });
+    rt.dispose(); pm.dispose(); return {};
+  });
+}
+
+say('', '');
+say('ALL STEPS PASSED — nothing here killed the context', 'ok');
+beacon('probe', 'ALL PASSED | ' + JSON.stringify(limits()));
+</script>
+</body>
+</html>
