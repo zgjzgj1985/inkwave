@@ -1335,13 +1335,67 @@ class Game {
       this.showcase.render();
     }
     const tC = performance.now();
-    const ps = this.perf || (this.perf = { sim: 0, render: 0, calls: 0, tris: 0 });
+    const ps = this.perf || (this.perf = { sim: 0, render: 0, calls: 0, tris: 0, tail: 0, minimap: 0, maxFt: 0 });
     ps.sim += (tB - tA - ps.sim) * 0.05; ps.render += (tC - tB - ps.render) * 0.05;
     ps.calls = G.renderer.info.render.calls; ps.tris = G.renderer.info.render.triangles;
     // HUD
     if (m && !m.attract && this.hud && (m.state === 'playing' || m.state === 'intro' || m.state === 'finish')) this._updateHud(dt);
     this.menus?.update?.(dt);
     this.input.endFrame();
+    // The frame does not end where perf.render stops. The HUD update and, above all, the minimap's canvas repaint run
+    // after every timer has been closed — and on a phone that was the largest single per-frame cost measured, while
+    // every probe reported the 3D scene as cheap. An unmeasured cost is an invisible one, so it is measured here.
+    const tD = performance.now();
+    ps.tail += (tD - tC - ps.tail) * 0.05;
+    // Worst-frame statistics, and only once play has settled. The first frame after the world is built, and again the
+    // first after new content appears, take seconds — every shader compiles and every texture uploads on them — and
+    // letting one into the maximum pins the reading at the boot cost forever, hiding the spikes the number exists to
+    // show. Three seconds in, what is left is the frame time a player actually lives with.
+    const playing = !!m && m.state === 'playing';
+    this._playT = playing ? (this._playT || 0) + dt : 0;
+    if (playing && this._playT > 3) {
+      const ft = tD - tA;
+      if (ft > ps.maxFt) ps.maxFt = ft;
+      // A frame over 25 ms is a dropped one at 60 Hz. The count separates a scene that is uniformly expensive from one
+      // that is mostly fine and stalls — two problems with completely different fixes.
+      if (ft > 25) ps.slowN = (ps.slowN || 0) + 1;
+      ps.frames = (ps.frames || 0) + 1;
+    }
+    this._perfBeacon(dt);
+  }
+
+  // Perf telemetry, reported back to whoever is serving this build.
+  //
+  // The device that has the performance problem is the one that can least be asked about it — a phone has no console to
+  // attach. It can, however, reach the machine serving it, so it reports there through the same beacon the boot and GPU
+  // probes already use; that helper no-ops on a public host, so a deployed build is unaffected. Nothing here asks the
+  // player for anything: it measures the match actually being played, not a synthetic scene.
+  //
+  // Sent repeatedly, not once. A phone's frame rate drifts as it heats and as memory fills, and a single sample cannot
+  // tell a device that is simply this fast from one that started fast and then throttled — which is the difference
+  // between optimising the renderer and optimising nothing at all.
+  _perfBeacon(dt) {
+    if (!window.__beacon) return;
+    const m = this.match;
+    if (!m || m.attract || m.state !== 'playing' || document.hidden) { this._pbT = 0; return; }
+    this._pbT = (this._pbT || 0) + dt;
+    // A first report once the match is properly under way, then one a minute so a session shows its drift.
+    if (this._pbT < (this._pbSent ? 60 : 20)) return;
+    this._pbT = 0; this._pbSent = true;
+    const p = this.perf; if (!p) return;
+    const R = this.R, cv = R.renderer.domElement, q = R.q || {};
+    const ms2 = (v) => +v.toFixed(2);
+    try {
+      window.__beacon('perf', JSON.stringify({
+        fps: this.fps, quality: this.settings.quality, state: m.state,
+        sim: ms2(p.sim), render: ms2(p.render), tail: ms2(p.tail), minimap: ms2(p.minimap),
+        maxFt: Math.round(p.maxFt), slow: p.slowN || 0, n: p.frames || 0,
+        calls: p.calls, tris: p.tris,
+        dyn: +R.dynScale.toFixed(2), buf: `${cv.width}x${cv.height}`, dpr: +devicePixelRatio.toFixed(2),
+        win: `${innerWidth}x${innerHeight}`, memK: this.memK, touch: this.touchMode,
+      }));
+    } catch (e) { /* telemetry must never be able to break the game */ }
+    p.maxFt = 0; p.slowN = 0; p.frames = 0;
   }
 
   // continuous sounds tied to the local player's state (swim gurgle, wall climb, enemy-ink sizzle)
@@ -1424,7 +1478,11 @@ class Game {
 
   _updateHud(dt) {
     const m = this.match, a = m.local, cam = G.camera;
+    const tmm = performance.now();
     this.minimap.update(dt);
+    // The minimap is timed on its own as well as inside `tail`: it is the one part of the frame that was found to cost
+    // more than everything else on a phone, so it is worth being able to see separately from the HUD around it.
+    if (this.perf) this.perf.minimap += (performance.now() - tmm - this.perf.minimap) * 0.05;
     const w = a.weapon;
     // crosshair spread = the weapon's live cone (first-shot accurate, blooms with sustained fire / in the air)
     const vHalf = (G.camera.fov * Math.PI) / 360;

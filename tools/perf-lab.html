@@ -270,9 +270,11 @@ function tick() {
   }
   const warm = now - upAt < 1600;                            // the first window is still filling
   const live = liveFps != null && liveFps >= 25;
-  // The game cannot exceed what the browser hands it. When the two rates agree and both sit under 45, the ceiling is
-  // outside the game — and that changes the whole conclusion, so it is called out rather than left to be noticed.
-  capped = !warm && rafFps != null && liveFps != null && rafFps < 45 && liveFps <= rafFps + 3 && liveFps > 0;
+  // A ceiling can only be shown by removing the load and watching the rate refuse to rise. Frames matching the
+  // browser's animation-frame rate proves nothing at all: a second callback lands in the same frames as the game's, so
+  // both counters read the game's rate whether the limit is the game or the browser. What does prove it is the
+  // no-render probe still not reaching a playable rate with the whole scene switched off.
+  capped = !warm && ab.norender && liveFps != null && liveFps > 0 && liveFps < 45;
   const I = W.__inkwave, P = I.perf || {}, R = I.R || {}, t = W.__lab;
   const gl = G.renderer.getContext();
   lastTris = P.tris ?? null;
@@ -294,7 +296,7 @@ function tick() {
     ? `<span class="err">${failed.length} shader program(s) FAILED TO LINK — their meshes are not drawn</span>`
     : warm ? '<span class="dim">measuring…</span>'
       : !live ? '<span class="warn">stale — no frames are arriving (page hidden?)</span>'
-        : capped ? `<span class="warn">the browser is only giving ${rafFps} frames/s — the game is not the limit</span>`
+        : capped ? `<span class="warn">still only ${liveFps} frames/s with the scene switched off — this is not the renderer</span>`
           : '<span class="ok">live</span>';
 
   const row = (id, s) => { const el = $(id); if (el.__h !== s) { el.__h = s; el.innerHTML = s; } };
@@ -302,7 +304,9 @@ function tick() {
 
   row('rLive', [
     kv('frames/s', warm ? '…' : (liveFps ?? '–'), live ? 'ok' : 'warn'),
-    kv('raf/s', warm ? '…' : (rafFps ?? '–'), capped ? 'warn' : ''),
+    // An independent count of the same frames — the game's own `fps` is a counter that can be stale or wrong, and has
+    // been. It is not a ceiling: see above.
+    kv('raf/s', warm ? '…' : (rafFps ?? '–'), 'dim'),
     kv('frame budget', `${ms(total)}<span class="dim">/16.7ms</span>`, budget),
     kv('dynScale', fmt(R.dynScale, 2)),
     kv('buffer', R.renderer ? `${R.renderer.domElement.width}×${R.renderer.domElement.height}` : '–'),
@@ -352,7 +356,7 @@ function build(failed, progs, total) {
     `ext    ${d.ext}`,
     `device ${d.screen} @${d.dpr}x  mem ${d.mem}  cores ${d.cores}`,
     `state  ${G.match?.state || G.mode}  quality ${G.settings.quality}  shadows ${G.settings.shadows}  dynScale ${fmt(R.dynScale, 2)}`,
-    `rate   ${liveFps} frames/s live,  game fps ${I.fps},  raf ${rafFps}/s${capped ? '  <-- the browser is capping the frame rate; the game is not the limit' : ''}`,
+    `rate   ${liveFps} frames/s live,  game fps ${I.fps},  raf ${rafFps}/s (same frames, counted independently)${capped ? '  <-- STILL SLOW WITH THE SCENE OFF: not the renderer' : ''}`,
     `buffer ${R.renderer.domElement.width}x${R.renderer.domElement.height}  dynScale ${fmt(R.dynScale, 2)}  dpr ${d.dpr}`,
     `cost   sim ${ms(P.sim)}  render ${ms(P.render)}  tail ${ms(mean(t.tail))}  minimap ${ms(mean(t.minimap))} peak ${ms(peak(t.minimap))}  menus ${ms(mean(t.menus))}  fx ${ms(mean(t.fx))}  env ${ms(mean(t.env))}  = ${ms(total)}/16.7ms`,
     `scene  calls ${P.calls}  tris ${P.tris}  actors ${(G.actors || []).length}`,
