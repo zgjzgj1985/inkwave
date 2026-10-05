@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d1020">
+<title>INKWAVE — mobile perf lab</title>
+<link rel="icon" href="data:,"><!-- the lab needs no icon; without this the browser asks for /favicon.ico and logs a 404 -->
+<style>
+  html, body { margin: 0; height: 100%; background: #0d1020; color: #eae6f5;
+    font: 600 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overscroll-behavior: none; touch-action: manipulation; -webkit-user-select: none; user-select: none; }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; background: #0d1020; }
+  #panel { position: fixed; left: 0; top: 0; right: 0; z-index: 10; background: rgba(13, 16, 32, .86);
+    backdrop-filter: blur(4px); padding: 6px 9px calc(7px + env(safe-area-inset-bottom)); max-height: 100%; overflow: auto; }
+  #panel.collapsed .row, #panel.collapsed .ab, #panel.collapsed .hint, #panel.collapsed #report { display: none; }
+  #bar { display: flex; align-items: center; gap: 8px; }
+  #bar b { font-size: 13px; letter-spacing: .05em; }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: #5b5773; flex: none; }
+  #dot.on { background: #6ee7a8; box-shadow: 0 0 7px #6ee7a8; }
+  #dot.stale { background: #ffb020; } #dot.bad { background: #ff5f7a; box-shadow: 0 0 7px #ff5f7a; }
+  #bar button { font: inherit; color: inherit; background: #241f38; border: 1px solid #3b3457; border-radius: 6px;
+    padding: 3px 10px; margin-left: auto; cursor: pointer; }
+  .row { display: flex; flex-wrap: wrap; gap: 3px 13px; margin-top: 6px; }
+  .row span i { font-style: normal; color: #8b85a4; }
+  .warn { color: #ffb020; } .err { color: #ff5f7a; } .ok { color: #6ee7a8; } .dim { color: #8b85a4; }
+  .ab { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+  .ab button { font: inherit; color: inherit; background: #241f38; border: 1px solid #3b3457; border-radius: 6px;
+    padding: 4px 9px; font-size: 11px; cursor: pointer; }
+  .ab button.on { background: #3a2b57; border-color: #7a5cc4; color: #d9cdff; }
+  .ab button.sel { background: #1d3a2e; border-color: #3f7d5f; color: #9ff0c4; }
+  .sep { width: 1px; align-self: stretch; background: #2c2740; margin: 0 3px; }
+  .hint { margin-top: 7px; color: #8b85a4; font-size: 11px; line-height: 1.5; }
+  .hint b { color: #c9c2e0; }
+  #report { white-space: pre-wrap; word-break: break-word; margin-top: 7px; background: #151222;
+    border: 1px solid #2c2740; border-radius: 6px; padding: 7px; max-height: 40vh; overflow: auto;
+    display: none; -webkit-user-select: text; user-select: text; }
+  #report.show { display: block; }
+</style>
+</head>
+<body>
+<iframe id="game" allow="fullscreen"></iframe>
+
+<div id="panel">
+  <div id="bar">
+    <span id="dot"></span>
+    <b>PERF LAB</b>
+    <span id="verdict">booting…</span>
+    <button id="toggle">hide</button>
+  </div>
+
+  <div class="row" id="rLive"></div>
+  <div class="row" id="rCost"></div>
+  <div class="row" id="rScene"></div>
+  <div class="row" id="rDevice"></div>
+  <div class="row" id="rShaders"></div>
+
+  <div class="ab" id="abRow"></div>
+  <div class="ab">
+    <button id="copy">copy report</button>
+    <button id="reload">reload game</button>
+  </div>
+
+  <div class="hint">
+    A reading only counts while <b>live</b>. A hidden or backgrounded page gets no animation frames at all, so every
+    counter — the game's own fps included — freezes at its last value and looks exactly like a real slowdown. The
+    <i>frames/s</i> figure below is counted here, from the game's frame counter, so a frozen page reads as
+    <b class="warn">stale</b> instead of reporting a number. Nothing here writes back to the project.
+  </div>
+  <div id="report"></div>
+</div>
+
+<script>
+// Mobile performance lab — a wrapper around the real game, because the questions worth asking (does this phone hold
+// 60, what costs what, did a shader fail to link) can only be answered by the real scene on the real GPU.
+//
+// Three things this exists to make impossible to get wrong, each of which cost real time on this project:
+//
+//   1. STALE NUMBERS. A phone browser stops animating a hidden page, so `fps` and every other counter freeze at their
+//      last value — indistinguishable from a real slowdown unless you check that frames are still arriving. This
+//      session was sent down several blind alleys by exactly that. The live indicator counts frames itself.
+//   2. THE UNTIMED TAIL. main.js closes perf.sim and perf.render long before the frame ends; the HUD update and, above
+//      all, the minimap's canvas repaint run after that. The minimap turned out to be the largest single per-frame
+//      cost on a phone (8.8 ms average, 189 ms peak) and every probe missed it because nothing was timing it. The
+//      `tail` figure below is that whole region, timed.
+//   3. SILENT SHADER FAILURES. A GLSL program whose stages compile but whose LINK fails is never drawn and never
+//      reports an error — here that silently removed the ground and the sea from every phone, because the level
+//      fragment shader exceeded the 256 uniform vectors GLES3 guarantees. Desktop allows 1024, so it never appeared
+//      there. The shader row audits link status directly, which is the check that finds it.
+//
+// The game runs in a same-origin iframe, so this reads its internals without the game knowing it is watched.
+const $ = (id) => document.getElementById(id);
+const frame = $('game');
+const fmt = (n, d = 1) => (typeof n === 'number' && isFinite(n) ? n.toFixed(d) : '–');
+const ms = (n) => (n == null ? '–' : (n < 0.05 ? '<0.1' : n.toFixed(1)));
+
+// Forward the switches this lab understands to the game, so tools/perf-lab.html?quality=high works.
+const qs = new URLSearchParams(location.search);
+qs.set('nofullscreen', '');                       // fullscreen inside an iframe would hide this panel
+if (!qs.has('autostart')) qs.set('autostart', '600');
+if (!qs.has('autopilot')) qs.set('autopilot', '');
+if (!qs.has('quality')) qs.set('quality', 'low');
+frame.src = '../index.html?' + qs.toString();
+
+let G = null, W = null;                            // the game window, once it is up
+let lastFrameN = -1, winN = 0, winT = 0, liveFps = null, upAt = 0;
+const pageAt = performance.now();
+let lastReport = '';
+const ab = {}, base = {}, saved = {};   // saved = what a toggle replaced (to restore); base = frame rate before it was hidden
+const AB = [
+  { k: 'characters', label: 'characters' }, { k: 'environment', label: 'environment' },
+  { k: 'level', label: 'level mesh' }, { k: 'post', label: 'post fx' },
+  { k: 'minimap', label: 'minimap' },
+];
+const QUAL = ['low', 'medium', 'high', 'ultra'];
+
+// ---- device probe — the limits that decide whether a shader can link at all ----------------------------------------
+function device() {
+  // Read the limits off the context the game is actually using. A scratch canvas would report the same numbers but
+  // costs a second WebGL context, and on a phone that is already under memory pressure that is the last thing to add.
+  const gl = (G && G.renderer && G.renderer.getContext())
+    || document.createElement('canvas').getContext('webgl2')
+    || document.createElement('canvas').getContext('webgl');
+  if (!gl) return { renderer: 'no WebGL' };
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  const p = (k) => gl.getParameter(gl[k]);
+  return {
+    renderer: (dbg && p('UNMASKED_RENDERER_WEBGL')) || p('RENDERER'),
+    // The context belongs to the iframe's realm, so `instanceof WebGL2RenderingContext` is always false here — the
+    // constructor object is not the one this realm has. The version string is realm-independent.
+    ver: p('VERSION'), webgl2: /WebGL 2/.test(p('VERSION')),
+    // the fragment uniform budget is the one that bites. GLES3 guarantees only 256 vec4 slots and a shader over it
+    // fails at LINK time, not compile time, so the console stays clean while the mesh simply never draws.
+    fUniform: p('MAX_FRAGMENT_UNIFORM_VECTORS'), vUniform: p('MAX_VERTEX_UNIFORM_VECTORS'),
+    varying: p('MAX_VARYING_VECTORS'), maxTex: p('MAX_TEXTURE_SIZE'),
+    ext: ['EXT_color_buffer_float', 'KHR_parallel_shader_compile', 'OES_texture_float_linear']
+      .map((n) => n.replace(/^(EXT|KHR|OES|WEBGL)_/, '') + (gl.getExtension(n) ? '=y' : '=n')).join(' '),
+    dpr: window.devicePixelRatio, screen: `${screen.width}x${screen.height}`,
+    mem: navigator.deviceMemory ? navigator.deviceMemory + ' GB' : 'n/a',
+    cores: navigator.hardwareConcurrency || 'n/a',
+  };
+}
+
+// ---- time the work main.js does not time ----------------------------------------------------------------------------
+// Each bucket keeps a rolling window of samples and reports the mean; the peak is kept too, because the problem on a
+// phone was spiky frames (a 189 ms minimap compose) rather than a uniformly slow frame.
+function instrument(w) {
+  const t = (w.__lab = { tail: [], minimap: [], menus: [], fx: [], env: [] });
+  const wrap = (obj, key, bucket) => {
+    if (!obj || typeof obj[key] !== 'function' || obj[key].__lab) return;
+    const f = obj[key];
+    const g = function (...a) {
+      const s = performance.now(); const r = f.apply(this, a);
+      const b = t[bucket]; b.push(performance.now() - s); if (b.length > 180) b.shift();
+      return r;
+    };
+    g.__lab = 1; obj[key] = g;
+  };
+  wrap(w.__inkwave, '_updateHud', 'tail');   // main.js:1342 — everything after perf.render closes
+  wrap(w.__inkwave?.minimap, 'update', 'minimap');
+  wrap(w.__G?.menus, 'update', 'menus');
+  wrap(w.__G?.fx, 'update', 'fx');
+  wrap(w.__G?.env, 'update', 'env');
+}
+const mean = (a) => (a && a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+const peak = (a) => (a && a.length ? Math.max(...a) : null);
+
+// ---- A/B: hide one part of the scene and measure the difference ------------------------------------------------------
+// This is the bisect that had to be driven from a desktop debugger before; now it runs from the phone that has the
+// problem. Every toggle is reversible and none of it is persisted.
+function toggle(k) {
+  if (!G || !W) return;
+  ab[k] = !ab[k];
+  const on = ab[k], I = W.__inkwave;
+  if (k === 'characters') for (const a of G.actors || []) if (a.character?.root) a.character.root.visible = !on;
+  if (k === 'environment' && G.env?.root) G.env.root.visible = !on;
+  if (k === 'level' && I.levelMesh) I.levelMesh.visible = !on;
+  if (k === 'minimap' && I.minimap) {                       // silence the compose, keep the update
+    const m = I.minimap;
+    if (!m.__labCompose) m.__labCompose = m._compose.bind(m);
+    m._compose = on ? () => {} : m.__labCompose;
+  }
+  if (k === 'post') {                                       // drop the middle of the composer chain, keep in/out
+    const ps = I.R?.composer?.passes || [];
+    if (!saved.post) saved.post = ps.map((x) => x.enabled !== false);   // record the true state, before touching anything
+    for (let i = 1; i < ps.length - 1; i++) ps[i].enabled = on ? false : saved.post[i];
+  }
+  // remember the frame rate before the part was hidden, so the delta is against an untouched run
+  if (on && base[k] == null) base[k] = liveFps;
+  if (!on) base[k] = null;
+  paint();
+}
+// Quality is switchable at runtime: Renderer.applySettings rebuilds the composer and flags every material to
+// recompile when the preset changes. The paint atlas keeps its size until the world is rebuilt, so this measures the
+// rendering cost of the preset, not a full cold start at it.
+function setQuality(q) {
+  if (!G || !W) return;
+  G.settings.quality = q;
+  W.__inkwave.R.applySettings(G.settings);
+  for (const k in ab) if (ab[k]) toggle(k);                 // composer was rebuilt; drop stale toggle state
+  paint();
+}
+
+function paint() {
+  $('abRow').innerHTML = '<span class="dim" style="align-self:center">A/B</span>' + AB.map((a) => {
+    const d = ab[a.k] && base[a.k] != null && liveFps != null ? ` ${liveFps - base[a.k] >= 0 ? '+' : ''}${liveFps - base[a.k]}` : '';
+    return `<button data-ab="${a.k}" class="${ab[a.k] ? 'on' : ''}">${a.label}${d}</button>`;
+  }).join('') + '<span class="sep"></span>' + '<span class="dim" style="align-self:center">quality</span>'
+    + QUAL.map((q) => `<button data-q="${q}" class="${G && G.settings.quality === q ? 'sel' : ''}">${q}</button>`).join('');
+}
+
+// ---- the loop ------------------------------------------------------------------------------------------------------
+function tick() {
+  requestAnimationFrame(tick);
+  if (!W) {
+    try {
+      const w = frame.contentWindow;
+      if (w && w.__inkwave && w.__G && w.__G.settings) { W = w; G = w.__G; instrument(w); upAt = performance.now(); winT = upAt; paint(); }
+    } catch (e) { /* cross-origin: only possible if the game is served from another host */ }
+    if (!W) {
+      // Unbundled, the game is ~165 module requests plus a procedural world build; on a cold dev server that is a
+      // genuine wait, and a spinner that says nothing for a minute reads as a hang. Say which stage it is in.
+      const w = frame.contentWindow;
+      const s = w && w.__G ? 'building the level…' : 'loading the game…';
+      $('verdict').textContent = `${s} ${((performance.now() - pageAt) / 1000).toFixed(0)}s`;
+      return;
+    }
+  }
+  const now = performance.now();
+
+  // Liveness, counted from the game's own frame counter over a real one-second window. Everything else on this panel
+  // is meaningless without it, so it is computed first and gates the verdict.
+  const n = W.__inkwave._frameN ?? -1;
+  if (n !== lastFrameN) { winN += Math.max(0, n - lastFrameN); lastFrameN = n; }
+  if (winT === 0) { winT = now; winN = 0; }
+  if (now - winT >= 1000) { liveFps = Math.round((winN * 1000) / (now - winT)); winN = 0; winT = now; }
+  const warm = now - upAt < 1600;                            // the first window is still filling
+  const live = liveFps != null && liveFps >= 25;
+  const I = W.__inkwave, P = I.perf || {}, R = I.R || {}, t = W.__lab;
+  const gl = G.renderer.getContext();
+
+  // Shader audit. three keeps every linked program in renderer.info.programs; a program that failed to link is in
+  // there, is never drawn, and has no other symptom.
+  const failed = []; let progs = 0;
+  for (const pr of G.renderer.info.programs || []) {
+    progs++;
+    if (pr.program && !gl.getProgramParameter(pr.program, gl.LINK_STATUS)) failed.push(pr.name || pr.cacheKey?.split(',')[0] || '(unnamed)');
+  }
+
+  const tail = mean(t.tail), mmenus = mean(t.menus);
+  const total = (P.sim || 0) + (P.render || 0) + (tail || 0) + (mmenus || 0);
+  const budget = total > 16.9 ? 'err' : total > 13 ? 'warn' : 'ok';
+
+  $('dot').className = failed.length ? 'bad' : (live ? 'on' : 'stale');
+  $('verdict').innerHTML = failed.length
+    ? `<span class="err">${failed.length} shader program(s) FAILED TO LINK — their meshes are not drawn</span>`
+    : warm ? '<span class="dim">measuring…</span>'
+      : live ? '<span class="ok">live</span>'
+        : '<span class="warn">stale — no frames are arriving (page hidden?)</span>';
+
+  const row = (id, s) => { const el = $(id); if (el.__h !== s) { el.__h = s; el.innerHTML = s; } };
+  const kv = (k, v, cls = '') => `<span><i>${k}</i> <b class="${cls}">${v}</b></span>`;
+
+  row('rLive', [
+    kv('frames/s', warm ? '…' : (liveFps ?? '–'), live ? 'ok' : 'warn'),
+    kv('game fps', I.fps || (I.fps === 0 ? '0' : '–'), I.fps ? '' : 'warn'),
+    kv('frame budget', `${ms(total)}<span class="dim">/16.7ms</span>`, budget),
+    kv('dynScale', fmt(R.dynScale, 2)),
+    kv('buffer', R.renderer ? `${R.renderer.domElement.width}×${R.renderer.domElement.height}` : '–'),
+  ].join(''));
+
+  row('rCost', [
+    kv('sim', ms(P.sim)), kv('render', ms(P.render)),
+    kv('tail', ms(tail)), kv('minimap', `${ms(mean(t.minimap))}<span class="dim">/${ms(peak(t.minimap))}</span>`),
+    kv('menus', ms(mmenus)), kv('fx', ms(mean(t.fx))), kv('env', ms(mean(t.env))),
+  ].join('') + '<span class="dim">ms — tail is HUD+minimap, after main.js stops timing</span>');
+
+  row('rScene', [
+    kv('calls', P.calls ?? '–'), kv('tris', P.tris ?? '–'),
+    kv('actors', (G.actors || []).length),
+    kv('state', G.match?.state || G.mode),
+    kv('shadows', String(G.settings.shadows)),
+  ].join(''));
+
+  const d = window.__labDevice || (window.__labDevice = device());
+  row('rDevice', [
+    kv('gpu', String(d.renderer).slice(0, 40)),
+    kv('fUniform', d.fUniform, d.fUniform <= 256 ? 'warn' : ''),
+    kv('dpr', d.dpr), kv('screen', d.screen), kv('mem', d.mem), kv('cores', d.cores),
+    kv('ext', d.ext),
+  ].join(''));
+
+  row('rShaders', failed.length
+    ? `<span class="err">FAILED TO LINK: ${failed.join(', ')}</span>`
+    : `<span class="ok">all ${progs} programs linked</span>`);
+
+  if (failed.length || (!live && !warm)) lastReport = build(failed, progs, total);
+}
+
+function build(failed, progs, total) {
+  const I = W.__inkwave, P = I.perf || {}, R = I.R || {}, t = W.__lab, d = window.__labDevice || {};
+  const delta = AB.map((a) => (base[a.k] != null && liveFps != null ? `${a.k} ${liveFps - base[a.k] >= 0 ? '+' : ''}${liveFps - base[a.k]}fps` : null)).filter(Boolean).join(', ');
+  return [
+    `INKWAVE perf lab  ${new Date().toISOString()}`,
+    `page   ${location.href}`,
+    `gpu    ${d.renderer}`,
+    `gl     ${d.ver}  webgl2 ${d.webgl2}`,
+    `limits fUniform ${d.fUniform}  vUniform ${d.vUniform}  varying ${d.varying}  maxTex ${d.maxTex}`,
+    `ext    ${d.ext}`,
+    `device ${d.screen} @${d.dpr}x  mem ${d.mem}  cores ${d.cores}`,
+    `state  ${G.match?.state || G.mode}  quality ${G.settings.quality}  shadows ${G.settings.shadows}  dynScale ${fmt(R.dynScale, 2)}`,
+    `rate   ${liveFps} frames/s live,  game fps ${I.fps},  buffer ${R.renderer.domElement.width}x${R.renderer.domElement.height}`,
+    `cost   sim ${ms(P.sim)}  render ${ms(P.render)}  tail ${ms(mean(t.tail))}  minimap ${ms(mean(t.minimap))} peak ${ms(peak(t.minimap))}  menus ${ms(mean(t.menus))}  fx ${ms(mean(t.fx))}  env ${ms(mean(t.env))}  = ${ms(total)}/16.7ms`,
+    `scene  calls ${P.calls}  tris ${P.tris}  actors ${(G.actors || []).length}`,
+    `shader ${failed.length ? 'FAILED TO LINK: ' + failed.join(', ') : 'all ' + progs + ' linked'}`,
+    `A/B    ${delta || 'none run'}`,
+  ].join('\n');
+}
+
+$('toggle').addEventListener('click', () => {
+  const p = $('panel');
+  p.classList.toggle('collapsed');
+  $('toggle').textContent = p.classList.contains('collapsed') ? 'show' : 'hide';
+});
+$('abRow').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.ab) toggle(b.dataset.ab);
+  else if (b.dataset.q) setQuality(b.dataset.q);
+});
+$('reload').addEventListener('click', () => {
+  W = null; G = null; lastFrameN = -1; winN = 0; winT = 0; liveFps = null; paint();
+  try { frame.contentWindow.location.reload(); } catch (e) { frame.src = '../index.html?' + qs.toString(); }
+});
+$('copy').addEventListener('click', async () => {
+  const txt = lastReport || build([], 0, 0);
+  const el = $('report');
+  el.textContent = txt; el.classList.add('show');
+  try { await navigator.clipboard.writeText(txt); $('copy').textContent = 'copied'; }
+  catch (e) { $('copy').textContent = 'select text above'; }
+  setTimeout(() => { $('copy').textContent = 'copy report'; }, 2500);
+});
+
+paint();
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
