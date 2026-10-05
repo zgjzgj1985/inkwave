@@ -153,6 +153,32 @@ const abMap = await page.evaluate(() => {
 });
 check('A/B minimap silences the compose and restores it', abMap.muted && abMap.restored);
 
+// The probe that splits CPU from GPU. Stopping the renderer must stop the renderer — and the graph must show it, or
+// the reading that follows would be attributed to the wrong side.
+const probe = await page.evaluate(async () => {
+  const w = document.getElementById('game').contentWindow;
+  const sleep = (t) => new Promise((r) => setTimeout(r, t));
+  document.querySelector('button[data-ab="norender"]').click();
+  const skipped = w.__inkwave._skipRender === true;
+  await sleep(1200);
+  const calls = w.__inkwave.perf.calls;
+  document.querySelector('button[data-ab="norender"]').click();
+  await sleep(1200);
+  return { skipped, calls, restored: w.__inkwave._skipRender === false, callsBack: w.__inkwave.perf.calls };
+});
+// Visually the scene goes blank; the graph drops from ~100 draw calls to a residual that is not part of the frame
+// (something draws outside R.render()). What matters for attributing cost is that the drop is total, not that it is
+// literally zero.
+check('the no-render probe stops drawing and restores',
+  probe.skipped && probe.restored && probe.calls <= 2 && probe.callsBack > 20,
+  `draw calls while stopped ${probe.calls}, after restore ${probe.callsBack}`);
+
+// The ceiling the browser imposes, measured independently of the game. Without it a device capped at 30 Hz cannot be
+// told apart from a game that is merely slow.
+const rates = await page.evaluate(() => document.getElementById('rLive').textContent);
+check('the browser frame ceiling is measured alongside the game',
+  /raf\/s\s+\d+/.test(rates), (rates.match(/frames\/s\s+\d+\s*raf\/s\s+\d+/) || [''])[0]);
+
 const q = await page.evaluate(() => {
   const w = document.getElementById('game').contentWindow;
   const before = w.__G.settings.quality;
