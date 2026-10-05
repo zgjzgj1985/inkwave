@@ -55,8 +55,11 @@
   <div class="row" id="rDevice"></div>
   <div class="row" id="rShaders"></div>
 
+  <div class="row" id="rAuto"></div>
+
   <div class="ab" id="abRow"></div>
   <div class="ab">
+    <button id="run">run sweep</button>
     <button id="copy">copy report</button>
     <button id="reload">reload game</button>
   </div>
@@ -151,6 +154,7 @@ function device() {
 // Each bucket keeps a rolling window of samples and reports the mean; the peak is kept too, because the problem on a
 // phone was spiky frames (a 189 ms minimap compose) rather than a uniformly slow frame.
 function instrument(w) {
+  w.__perfLab = true;                      // this page reports for the build it drives; the game's own reporter stands down
   const t = (w.__lab = { tail: [], minimap: [], menus: [], fx: [], env: [] });
   const wrap = (obj, key, bucket) => {
     if (!obj || typeof obj[key] !== 'function' || obj[key].__lab) return;
@@ -240,7 +244,12 @@ function tick() {
   if (!W) {
     try {
       const w = frame.contentWindow;
-      if (w && w.__inkwave && w.__G && w.__G.settings) { W = w; G = w.__G; instrument(w); upAt = performance.now(); winT = upAt; paint(); }
+      if (w && w.__inkwave && w.__G && w.__G.settings) {
+        W = w; G = w.__G; instrument(w); upAt = performance.now(); winT = upAt; paint();
+        // The sweep starts on its own: the whole point is that the person holding the phone does not have to do
+        // anything but open this page. ?manual keeps the buttons for when someone wants to drive it by hand.
+        if (!qs.has('manual')) sweep();
+      }
     } catch (e) { /* cross-origin: only possible if the game is served from another host */ }
     if (!W) {
       // Unbundled, the game is ~165 module requests plus a procedural world build; on a cold dev server that is a
@@ -365,6 +374,76 @@ function build(failed, progs, total) {
   ].join('\n');
 }
 
+// ---- the sweep, and the trip home ----------------------------------------------------------------------------------
+// The measurements only mean something on the device that has the problem, and the device with the problem is the one
+// nobody wants to tap through a bisection on. So the page runs the whole sequence by itself and sends each result back
+// to whatever served it — the same beacon the game uses, which is a request for a path that cannot exist and is read
+// out of the server's log. One page load, no taps, nothing to copy back.
+const PRIVATE = (() => {
+  try {
+    const h = location.hostname;
+    return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h.endsWith('.local')
+      || /^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(h);
+  } catch (e) { return false; }
+})();
+const send = (line) => { if (PRIVATE) fetch('/__inkwave_error/lab:' + encodeURIComponent(line)).catch(() => {}); };
+const sleep = (t) => new Promise((r) => setTimeout(r, t));
+
+function sample(label, ref) {
+  const I = W.__inkwave, P = I.perf || {}, R = I.R || {}, t = W.__lab || {};
+  const f = (v, d = 1) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d) : '?');
+  const d = ref != null && liveFps != null ? `  dfps=${liveFps - ref >= 0 ? '+' : ''}${liveFps - ref}` : '';
+  return `${label}  fps=${liveFps} raf=${rafFps}${d}  sim=${f(P.sim, 2)} render=${f(P.render, 2)}`
+    + ` tail=${f(mean(t.tail), 2)} minimap=${f(mean(t.minimap), 2)} menu=${f(mean(t.menus), 2)}`
+    // `perf` carries slowN/frames; the beacon renames them when it sends. Reading the wire names here silently
+    // yields zero, which reads as "no slow frames" rather than as a mistake.
+    + ` maxFt=${Math.round(P.maxFt || 0)} slow=${P.slowN || 0}/${P.frames || 0}`
+    + ` calls=${P.calls} tris=${P.tris} dyn=${f(R.dynScale, 2)} buf=${R.renderer.domElement.width}x${R.renderer.domElement.height}`;
+}
+const say2 = (s) => { $('rAuto').innerHTML = `<span class="dim">sweep</span> <b>${s}</b>`; };
+
+let sweeping = false;
+async function sweep() {
+  if (sweeping || !W) return;
+  sweeping = true;
+  const seq = ['norender', 'level', 'environment', 'characters', 'post', 'minimap'];
+  try {
+    say2('waiting for play…');
+    for (let i = 0; i < 240 && !(G.match && G.match.state === 'playing'); i++) await sleep(1000);
+    // Wait for the frame rate to settle before calling anything a baseline. The first seconds of a match are not
+    // representative of it: new content compiles its shaders and uploads its textures on the frame it first appears,
+    // and a single such frame is seconds long — enough to drag the one-second average to nearly zero and make every
+    // delta measured against it meaningless (they all read "+52").
+    say2('settling…');
+    let last = -1, stable = 0;
+    for (let i = 0; i < 30; i++) {
+      await sleep(1000);
+      if (liveFps != null && liveFps > 0 && liveFps === last) stable++; else stable = 0;
+      last = liveFps;
+      if (i >= 9 && stable >= 3) break;
+    }
+    await sleep(2000);
+    const base = liveFps;
+    send('lab start ' + sample('baseline', null));
+    say2('baseline');
+    for (const k of seq) {
+      toggle(k);                                        // on
+      say2(`${k} off…`);
+      await sleep(7000);
+      send('lab ' + sample(`-${k}`, base));
+      toggle(k);                                        // back off
+      await sleep(3000);
+    }
+    send('lab done ' + sample('final', base));
+    say2('done — results sent');
+  } catch (e) {
+    send('lab failed ' + (e && e.message));
+    say2('failed: ' + (e && e.message));
+  }
+  sweeping = false;
+}
+
+$('run').addEventListener('click', sweep);
 $('toggle').addEventListener('click', () => {
   const p = $('panel');
   p.classList.toggle('collapsed');

@@ -1375,7 +1375,9 @@ class Game {
   // tell a device that is simply this fast from one that started fast and then throttled — which is the difference
   // between optimising the renderer and optimising nothing at all.
   _perfBeacon(dt) {
-    if (!window.__beacon) return;
+    // The perf lab drives this build and reports its own, finer-grained results; two reporters would fight over the
+    // same counters (this one clears the worst-frame statistics every time it sends).
+    if (!window.__beacon || window.__perfLab) return;
     const m = this.match;
     if (!m || m.attract || m.state !== 'playing' || document.hidden) { this._pbT = 0; return; }
     this._pbT = (this._pbT || 0) + dt;

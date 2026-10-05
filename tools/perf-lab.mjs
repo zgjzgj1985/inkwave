@@ -47,7 +47,8 @@ page.on('response', (r) => { if (r.status() >= 400 && !isBeacon(r.url())) badUrl
 page.on('requestfailed', (r) => { if (!isBeacon(r.url())) badUrls.push('[failed] ' + r.url() + ' ' + (r.failure()?.errorText || '')); });
 
 console.log(`perf lab -> ${BASE}/tools/perf-lab.html   (${W}x${H} touch viewport)\n`);
-await page.goto(`${BASE}/tools/perf-lab.html`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+// ?manual: the page sweeps the scene by itself on load, which would fight every A/B this check drives by hand.
+await page.goto(`${BASE}/tools/perf-lab.html?manual`, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
 // The lab boots the game itself. Unbundled that is ~165 module requests plus a procedural world build, and this dev
 // server is single-threaded — on a cold start it has taken over 40 s here, so the wait is generous and the stage is
@@ -173,10 +174,10 @@ check('the no-render probe stops drawing and restores',
   probe.skipped && probe.restored && probe.calls <= 2 && probe.callsBack > 20,
   `draw calls while stopped ${probe.calls}, after restore ${probe.callsBack}`);
 
-// The ceiling the browser imposes, measured independently of the game. Without it a device capped at 30 Hz cannot be
-// told apart from a game that is merely slow.
+// Frames counted independently of the game's own `fps`, which is a counter that can be stale or simply wrong and has
+// been. It is not a ceiling measurement — a second callback runs in the same frames as the game's, so it cannot be.
 const rates = await page.evaluate(() => document.getElementById('rLive').textContent);
-check('the browser frame ceiling is measured alongside the game',
+check('frames are counted independently of the game\\'s own counter',
   /raf\/s\s+\d+/.test(rates), (rates.match(/frames\/s\s+\d+\s*raf\/s\s+\d+/) || [''])[0]);
 
 const q = await page.evaluate(() => {
