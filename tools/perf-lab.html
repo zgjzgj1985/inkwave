@@ -103,14 +103,20 @@ if (!qs.has('quality')) qs.set('quality', 'low');
 frame.src = '../index.html?' + qs.toString();
 
 let G = null, W = null;                            // the game window, once it is up
-let lastFrameN = -1, winN = 0, winT = 0, liveFps = null, upAt = 0;
+let lastFrameN = -1, winN = 0, winT = 0, liveFps = null, rafN = 0, rafFps = null, upAt = 0, lastTris = null;
+let capped = false;
 const pageAt = performance.now();
 let lastReport = '';
-const ab = {}, base = {}, saved = {};   // saved = what a toggle replaced (to restore); base = frame rate before it was hidden
+// saved = what a toggle replaced (to restore); base/baseTris = the frame rate and triangle count before it was hidden
+const ab = {}, base = {}, baseTris = {}, saved = {};
 const AB = [
   { k: 'characters', label: 'characters' }, { k: 'environment', label: 'environment' },
   { k: 'level', label: 'level mesh' }, { k: 'post', label: 'post fx' },
   { k: 'minimap', label: 'minimap' },
+  // Not a scene part: stops rendering entirely. The first question about a slow phone is whether the GPU is involved
+  // at all, and the CPU-side timings cannot answer it — perf.render measures the cost of *submitting* the frame, not
+  // of drawing it, so a fill- or geometry-bound device shows small numbers and a low frame rate at the same time.
+  { k: 'norender', label: 'no render' },
 ];
 const QUAL = ['low', 'medium', 'high', 'ultra'];
 
@@ -185,9 +191,12 @@ function toggle(k) {
     if (!saved.post) saved.post = ps.map((x) => x.enabled !== false);   // record the true state, before touching anything
     for (let i = 1; i < ps.length - 1; i++) ps[i].enabled = on ? false : saved.post[i];
   }
-  // remember the frame rate before the part was hidden, so the delta is against an untouched run
-  if (on && base[k] == null) base[k] = liveFps;
-  if (!on) base[k] = null;
+  if (k === 'norender') I._skipRender = on;
+  // Remember the frame rate and the triangle count before the part was hidden, so both deltas are against an untouched
+  // run. Triangles matter as much as frame rate here: a phone that is vertex-bound and one that cannot keep up on the
+  // CPU look identical in the frame rate alone.
+  if (on && base[k] == null) { base[k] = liveFps; baseTris[k] = lastTris; }
+  if (!on) { base[k] = null; baseTris[k] = null; }
   paint();
 }
 // Quality is switchable at runtime: Renderer.applySettings rebuilds the composer and flags every material to
@@ -201,17 +210,33 @@ function setQuality(q) {
   paint();
 }
 
+const sgn = (n) => (n >= 0 ? '+' : '−') + Math.abs(n);
 function paint() {
-  $('abRow').innerHTML = '<span class="dim" style="align-self:center">A/B</span>' + AB.map((a) => {
-    const d = ab[a.k] && base[a.k] != null && liveFps != null ? ` ${liveFps - base[a.k] >= 0 ? '+' : ''}${liveFps - base[a.k]}` : '';
-    return `<button data-ab="${a.k}" class="${ab[a.k] ? 'on' : ''}">${a.label}${d}</button>`;
-  }).join('') + '<span class="sep"></span>' + '<span class="dim" style="align-self:center">quality</span>'
+  $('abRow').innerHTML = '<span class="dim" style="align-self:center">A/B</span>' + AB.map((a) =>
+    `<button data-ab="${a.k}" class="${ab[a.k] ? 'on' : ''}">${a.label}</button>`).join('')
+    + '<span class="sep"></span>' + '<span class="dim" style="align-self:center">quality</span>'
     + QUAL.map((q) => `<button data-q="${q}" class="${G && G.settings.quality === q ? 'sel' : ''}">${q}</button>`).join('');
+}
+// Refreshed once a second rather than on click — a delta read at the instant of the click is always zero. Only the
+// labels are touched, so a button being pressed underneath is never rebuilt mid-tap.
+function deltas() {
+  for (const b of $('abRow').querySelectorAll('button[data-ab]')) {
+    const k = b.dataset.ab, a = AB.find((x) => x.k === k);
+    let d = '';
+    if (ab[k] && liveFps != null && base[k] != null) d += ` ${sgn(liveFps - base[k])}fps`;
+    if (ab[k] && lastTris != null && baseTris[k] != null) {
+      const t = Math.round((lastTris - baseTris[k]) / 1000);
+      if (t) d += ` ${sgn(t)}k△`;
+    }
+    const txt = a.label + d;
+    if (b.textContent !== txt) b.textContent = txt;
+  }
 }
 
 // ---- the loop ------------------------------------------------------------------------------------------------------
 function tick() {
   requestAnimationFrame(tick);
+  rafN++;
   if (!W) {
     try {
       const w = frame.contentWindow;
@@ -233,11 +258,24 @@ function tick() {
   const n = W.__inkwave._frameN ?? -1;
   if (n !== lastFrameN) { winN += Math.max(0, n - lastFrameN); lastFrameN = n; }
   if (winT === 0) { winT = now; winN = 0; }
-  if (now - winT >= 1000) { liveFps = Math.round((winN * 1000) / (now - winT)); winN = 0; winT = now; }
+  if (now - winT >= 1000) {
+    liveFps = Math.round((winN * 1000) / (now - winT));
+    // What the browser is willing to give, independent of the game. This callback rides the same rendering pipeline as
+    // the game's, so if it also lands near 30 the frame rate is being capped from outside the game — a 30 Hz mode, a
+    // throttled tab, a power profile — and no amount of scene optimisation can move it. If it reads 60 while the game
+    // reads 30, the game is the limit and the A/B switches below will find where.
+    rafFps = Math.round((rafN * 1000) / (now - winT));
+    rafN = 0; winN = 0; winT = now;
+    deltas();
+  }
   const warm = now - upAt < 1600;                            // the first window is still filling
   const live = liveFps != null && liveFps >= 25;
+  // The game cannot exceed what the browser hands it. When the two rates agree and both sit under 45, the ceiling is
+  // outside the game — and that changes the whole conclusion, so it is called out rather than left to be noticed.
+  capped = !warm && rafFps != null && liveFps != null && rafFps < 45 && liveFps <= rafFps + 3 && liveFps > 0;
   const I = W.__inkwave, P = I.perf || {}, R = I.R || {}, t = W.__lab;
   const gl = G.renderer.getContext();
+  lastTris = P.tris ?? null;
 
   // Shader audit. three keeps every linked program in renderer.info.programs; a program that failed to link is in
   // there, is never drawn, and has no other symptom.
@@ -255,15 +293,16 @@ function tick() {
   $('verdict').innerHTML = failed.length
     ? `<span class="err">${failed.length} shader program(s) FAILED TO LINK — their meshes are not drawn</span>`
     : warm ? '<span class="dim">measuring…</span>'
-      : live ? '<span class="ok">live</span>'
-        : '<span class="warn">stale — no frames are arriving (page hidden?)</span>';
+      : !live ? '<span class="warn">stale — no frames are arriving (page hidden?)</span>'
+        : capped ? `<span class="warn">the browser is only giving ${rafFps} frames/s — the game is not the limit</span>`
+          : '<span class="ok">live</span>';
 
   const row = (id, s) => { const el = $(id); if (el.__h !== s) { el.__h = s; el.innerHTML = s; } };
   const kv = (k, v, cls = '') => `<span><i>${k}</i> <b class="${cls}">${v}</b></span>`;
 
   row('rLive', [
     kv('frames/s', warm ? '…' : (liveFps ?? '–'), live ? 'ok' : 'warn'),
-    kv('game fps', I.fps || (I.fps === 0 ? '0' : '–'), I.fps ? '' : 'warn'),
+    kv('raf/s', warm ? '…' : (rafFps ?? '–'), capped ? 'warn' : ''),
     kv('frame budget', `${ms(total)}<span class="dim">/16.7ms</span>`, budget),
     kv('dynScale', fmt(R.dynScale, 2)),
     kv('buffer', R.renderer ? `${R.renderer.domElement.width}×${R.renderer.domElement.height}` : '–'),
@@ -299,7 +338,11 @@ function tick() {
 
 function build(failed, progs, total) {
   const I = W.__inkwave, P = I.perf || {}, R = I.R || {}, t = W.__lab, d = window.__labDevice || {};
-  const delta = AB.map((a) => (base[a.k] != null && liveFps != null ? `${a.k} ${liveFps - base[a.k] >= 0 ? '+' : ''}${liveFps - base[a.k]}fps` : null)).filter(Boolean).join(', ');
+  const delta = AB.map((a) => {
+    if (base[a.k] == null || liveFps == null) return null;
+    const t = baseTris[a.k] != null && lastTris != null ? `, ${Math.round((lastTris - baseTris[a.k]) / 1000)}k tris` : '';
+    return `${a.k} ${liveFps - base[a.k] >= 0 ? '+' : ''}${liveFps - base[a.k]}fps${t}`;
+  }).filter(Boolean).join(' | ');
   return [
     `INKWAVE perf lab  ${new Date().toISOString()}`,
     `page   ${location.href}`,
@@ -309,7 +352,8 @@ function build(failed, progs, total) {
     `ext    ${d.ext}`,
     `device ${d.screen} @${d.dpr}x  mem ${d.mem}  cores ${d.cores}`,
     `state  ${G.match?.state || G.mode}  quality ${G.settings.quality}  shadows ${G.settings.shadows}  dynScale ${fmt(R.dynScale, 2)}`,
-    `rate   ${liveFps} frames/s live,  game fps ${I.fps},  buffer ${R.renderer.domElement.width}x${R.renderer.domElement.height}`,
+    `rate   ${liveFps} frames/s live,  game fps ${I.fps},  raf ${rafFps}/s${capped ? '  <-- the browser is capping the frame rate; the game is not the limit' : ''}`,
+    `buffer ${R.renderer.domElement.width}x${R.renderer.domElement.height}  dynScale ${fmt(R.dynScale, 2)}  dpr ${d.dpr}`,
     `cost   sim ${ms(P.sim)}  render ${ms(P.render)}  tail ${ms(mean(t.tail))}  minimap ${ms(mean(t.minimap))} peak ${ms(peak(t.minimap))}  menus ${ms(mean(t.menus))}  fx ${ms(mean(t.fx))}  env ${ms(mean(t.env))}  = ${ms(total)}/16.7ms`,
     `scene  calls ${P.calls}  tris ${P.tris}  actors ${(G.actors || []).length}`,
     `shader ${failed.length ? 'FAILED TO LINK: ' + failed.join(', ') : 'all ' + progs + ' linked'}`,
