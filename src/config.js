@@ -590,6 +590,8 @@ export const DEFAULT_SETTINGS = {
   fov: 82,                  // horizontal FOV at 16:9, 65..100
   quality: 'high',          // 'low' | 'medium' | 'high' | 'ultra'
   qualityChosen: false,     // set when the player picks a tier in the settings; the touch default only applies while false
+  shadowsChosen: false,     // …and the same for shadows, which the touch default also overrides — tracked separately
+                            // so that picking a quality does not drag the shadow setting along with it
   shadows: true,
   bloom: true,
   cameraShake: 1.0,         // 0..1

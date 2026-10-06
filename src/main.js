@@ -91,14 +91,19 @@ class Game {
     // defaulted one does not. Testing the flag rather than "is quality present" also repairs devices that already
     // had the default persisted by an earlier run.
     this.touchMode = shouldUseTouch(this.settings);
-    if (this.touchMode && storedRaw?.qualityChosen !== true) {
-      this.settings.quality = 'low';
+    if (this.touchMode) {
       // Shadows cost a shadow-map render pass and, more importantly, a shadow variant of every material's program —
-      // which is exactly the kind of extra shader count that hurts on a phone. Off by default there; the settings
-      // screen can turn them back on.
-      this.settings.shadows = false;
-      this.settings.qualityChosen = false;
-      saveJSON('inkwave.settings', this.settings);
+      // exactly the extra shader count that hurts on a phone. Off by default there; the settings screen can turn them
+      // back on.
+      //
+      // Each default is gated on its OWN "the player chose this" flag. They used to share qualityChosen, so picking a
+      // quality tier on a phone — including picking 'low' — silently brought the shadow pass back: the whole block
+      // was skipped and settings.shadows kept its desktop default of true. Choosing a quality is not choosing
+      // shadows, and the phone that had ever opened the quality row would quietly be the slow one.
+      let changed = false;
+      if (storedRaw?.qualityChosen !== true && this.settings.quality !== 'low') { this.settings.quality = 'low'; changed = true; }
+      if (storedRaw?.shadowsChosen !== true && this.settings.shadows !== false) { this.settings.shadows = false; changed = true; }
+      if (changed) saveJSON('inkwave.settings', this.settings);
     }
     // Touch devices also halve the two largest GPU allocations. The tiers are sized for a desktop GPU; on a phone the
     // 2048² ink atlas and the procedural texture set are tens of megabytes of video memory before the world is even
@@ -529,8 +534,10 @@ class Game {
 
   _setSettings(partial) {
     Object.assign(this.settings, partial);
-    // an explicit quality pick must outrank the touch-device default (see boot())
+    // An explicit pick must outrank the touch-device default (see boot()). Tracked separately per setting: choosing a
+    // quality says nothing about whether the player wants shadows.
     if ('quality' in partial) this.settings.qualityChosen = true;
+    if ('shadows' in partial) this.settings.shadowsChosen = true;
     saveJSON('inkwave.settings', this.settings);
     if ('quality' in partial || 'shadows' in partial || 'bloom' in partial) this.R?.applySettings(this.settings);
     if ('fullscreen' in partial && window.inkwaveNative) window.inkwaveNative.setFullScreen(!!partial.fullscreen);
@@ -1390,6 +1397,10 @@ class Game {
     try {
       window.__beacon('perf', JSON.stringify({
         fps: this.fps, quality: this.settings.quality, state: m.state,
+        // Whether the touch defaults actually applied. They are skipped once the player has touched the quality
+        // setting (qualityChosen), and that flag is persisted — so a phone can silently be running with shadows on
+        // and a desktop-sized paint atlas, which is the first thing to rule out when it is slow.
+        shadows: this.settings.shadows !== false, chosen: this.settings.qualityChosen === true,
         sim: ms2(p.sim), render: ms2(p.render), tail: ms2(p.tail), minimap: ms2(p.minimap),
         maxFt: Math.round(p.maxFt), slow: p.slowN || 0, n: p.frames || 0,
         calls: p.calls, tris: p.tris,
@@ -1565,9 +1576,14 @@ class Game {
     }
     if (a.specialActive && m.state === 'playing' && a.alive) prompt = G.specials.prompt(a) || prompt;
     else if (m.state === 'playing' && a.alive && m.actors.some((o) => o !== a && o.team === a.team && o.specialActive?.id === 'booyah' && !o.specialActive.thrown)) prompt = 'A teammate is charging a Cheer Orb — press C to cheer it on!';
+    // Built once. The HUD wants [your team, theirs], and this used to get there by calling teamSummary() a second
+    // time and reversing that — two filtered, mapped, allocated summaries of the same eight actors every frame just
+    // to swap two entries.
+    const teams = m.teamSummary();
+    if (a.team === 1) teams.reverse();
     const frame = {
       time: m.practice ? null : m.time,
-      teams: a.team === 1 ? m.teamSummary().reverse() : m.teamSummary(),   // HUD: [your team, theirs]
+      teams,   // HUD: [your team, theirs]
       ink: a.ink / PLAYER.inkMax, inkLow: a.ink < 18 || (this._lowInkFlash > 0), subCost: a.specialActive?.kind === 'barrage' ? 0 : (a.sub || SUB.bomb).inkCost / PLAYER.inkMax, subKind: (a.specialActive?.kind === 'barrage' ? a.specialActive.bomb : a.sub || SUB.bomb).kind,
       poisoned: a.status.poison > 0, tracked: a.status.track > 0,
       special: a.specialActive ? G.specials.remaining(a) : a.specialFrac(), specialReady: a.specialReady(), specialActive: !!a.specialActive, specialId: a.specialId,
