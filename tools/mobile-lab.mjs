@@ -34,8 +34,11 @@ const errors = [];
 const badUrls = [];
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 page.on('pageerror', (e) => errors.push('[pageerror] ' + e.message));
-page.on('response', (r) => { if (r.status() >= 400) badUrls.push(r.status() + ' ' + r.url()); });
-page.on('requestfailed', (r) => badUrls.push('[failed] ' + r.url() + ' ' + (r.failure()?.errorText || '')));
+// The error beacon deliberately requests a path that cannot exist and relies on the dev server logging the 404 — it
+// is how a device with no console reports to the machine serving it. Expected, so not counted as a bad request.
+const isBeacon = (u) => u.includes('/__inkwave_error/');
+page.on('response', (r) => { if (r.status() >= 400 && !isBeacon(r.url())) badUrls.push(r.status() + ' ' + r.url()); });
+page.on('requestfailed', (r) => { if (!isBeacon(r.url())) badUrls.push('[failed] ' + r.url() + ' ' + (r.failure()?.errorText || '')); });
 
 // Force the layer on so the run is deterministic whatever Chrome reports for `pointer: coarse`. The auto-detect
 // result is reported separately below.

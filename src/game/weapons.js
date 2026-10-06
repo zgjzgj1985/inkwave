@@ -22,6 +22,7 @@ const SIM_DT = 1 / 60;
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _dir = new THREE.Vector3(), _fwd = new THREE.Vector3(), _vh = new THREE.Vector3(), _v4 = new THREE.Vector3();
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _c = new THREE.Color();
 const UP = new THREE.Vector3(0, 1, 0), DOWN = new THREE.Vector3(0, -1, 0), ZAX = new THREE.Vector3(0, 0, 1);
+const _da = new THREE.Vector3(), _db = new THREE.Vector3(), _dim = new THREE.Color(0.6, 0.6, 0.6);
 const _hit = new Hit(), _hit2 = new Hit();
 const _res = { t: 0, dist: 0 };
 const DEG = Math.PI / 180;
@@ -812,6 +813,13 @@ export class Projectiles {
     const arcN = 64;
     this.arcGeo = new THREE.BufferGeometry();
     this.arcGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(arcN * 3), 3));
+    // The dashed line needs a cumulative arc-length attribute. three's Line.computeLineDistances() builds a fresh JS
+    // array, a fresh BufferAttribute and so a fresh GPU buffer on every call — and this arc is recomputed every frame
+    // the player holds the sub button, which is one buffer allocation and upload per frame for 64 floats. Allocate it
+    // once here and write into it in place (see updateArc).
+    this.arcDist = new THREE.BufferAttribute(new Float32Array(arcN), 1);
+    this.arcDist.setUsage(THREE.DynamicDrawUsage);
+    this.arcGeo.setAttribute('lineDistance', this.arcDist);
     this.arcN = arcN;
     this.arcLine = new THREE.Line(this.arcGeo, new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.25, gapSize: 0.18, transparent: true, opacity: 0.95, depthTest: false }));
     this.arcLine.renderOrder = 10; this.arcLine.frustumCulled = false; this.arcLine.visible = false;
@@ -1861,8 +1869,16 @@ export class Projectiles {
     }
     pos.needsUpdate = true;
     this.arcGeo.setDrawRange(0, n);
-    this.arcLine.computeLineDistances();
-    const col = a.ink >= sub.inkCost ? a.color : new THREE.Color(0.6, 0.6, 0.6);
+    // The same distances three would have computed, written into the attribute allocated at setup: no new array, no
+    // new BufferAttribute, no new GPU buffer. Only the first `n` entries are read, because the draw range is `n`.
+    const dist = this.arcDist.array;
+    dist[0] = 0;
+    for (let i = 1; i < n; i++) {
+      _da.fromBufferAttribute(pos, i - 1); _db.fromBufferAttribute(pos, i);
+      dist[i] = dist[i - 1] + _da.distanceTo(_db);
+    }
+    this.arcDist.needsUpdate = true;
+    const col = a.ink >= sub.inkCost ? a.color : _dim;
     this.arcLine.material.color.copy(col).multiplyScalar(1.4);
     this.arcRing.material.color.copy(col).multiplyScalar(1.4);
     this.arcLine.visible = true;

@@ -177,7 +177,7 @@ check('the no-render probe stops drawing and restores',
 // Frames counted independently of the game's own `fps`, which is a counter that can be stale or simply wrong and has
 // been. It is not a ceiling measurement — a second callback runs in the same frames as the game's, so it cannot be.
 const rates = await page.evaluate(() => document.getElementById('rLive').textContent);
-check('frames are counted independently of the game\\'s own counter',
+check('frames are counted independently of the in-game fps counter',
   /raf\/s\s+\d+/.test(rates), (rates.match(/frames\/s\s+\d+\s*raf\/s\s+\d+/) || [''])[0]);
 
 const q = await page.evaluate(() => {

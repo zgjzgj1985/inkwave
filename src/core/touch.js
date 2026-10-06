@@ -295,7 +295,9 @@ export class TouchControls {
     // screen is left alone too — it advances on a tap anywhere, which portrait does fine.
     const cur = G.menus?.current;
     const armed = (G.mode === 'match' && !!G.match) || (!!cur && cur !== 'loading' && cur !== 'title');
-    this.rotateEl?.classList.toggle('is-armed', armed);
+    // Guarded: this runs before the gate below, so an unguarded toggle here is a DOM write every frame of the match
+    // whether or not anything changed. classList.toggle is cheap but it is not free, and it is not on the only path.
+    if (armed !== this._armed) { this._armed = armed; this.rotateEl?.classList.toggle('is-armed', armed); }
     if (live === this.enabled) return;
     this.enabled = live;
     this.el.classList.toggle('is-live', live);

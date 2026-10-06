@@ -40,3 +40,13 @@ export function gpuArgs(extra = []) {
   if (process.platform === 'darwin') args.unshift('--use-angle=metal');
   return args.concat(extra);
 }
+
+// Flags that take the frame rate cap off, for measuring rather than for testing.
+//
+// With vsync on, a 7 ms frame and a 1 ms frame both report the same 57 fps against a 16.7 ms budget, so a change that
+// halves the per-frame work is invisible — every optimisation reads as "no effect". These let the frame time itself
+// be the measurement. The trade is that the loop becomes CPU-bound, so GPU-side costs show up as under-measurement;
+// pair it with the no-render probe to tell which side a change actually moved.
+export function benchArgs(extra = []) {
+  return gpuArgs(['--disable-gpu-vsync', '--disable-frame-rate-limit', '--disable-background-timer-throttling'].concat(extra));
+}

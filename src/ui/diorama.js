@@ -170,7 +170,10 @@ export class DioramaOverlay {
       p.x = x; p.y = y;
       if (behind) { if (p.vis) { p.vis = false; p.el.style.display = 'none'; } continue; }
       if (!p.vis) { p.vis = true; p.el.style.display = ''; }
-      p.el.style.transform = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0)`;
+      // Written only when the rounded position actually moved: this loop runs every frame the map is open, and a pin
+      // whose target has not shifted by a tenth of a pixel does not need the browser to be told so again.
+      const tr = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0)`;
+      if (p.tr !== tr) { p.tr = tr; p.el.style.transform = tr; }
       if (i === 4) {
         // facing arrow: screen-space direction of the player's forward
         const f = me.yaw || 0;
